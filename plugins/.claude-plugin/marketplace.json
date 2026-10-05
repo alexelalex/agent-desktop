@@ -1,0 +1,20 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "agent-desktop-local",
+  "description": "Local Agent Desktop plugins for Claude Code",
+  "owner": {
+    "name": "Agent Desktop"
+  },
+  "plugins": [
+    {
+      "name": "agent-desktop",
+      "description": "Shows Claude Code sessions in Agent Desktop and lets them drive its UI over MCP: plans, activity, artifacts, approvals and tasks.",
+      "version": "0.2.0",
+      "author": {
+        "name": "Agent Desktop"
+      },
+      "source": "./agent-desktop",
+      "category": "productivity"
+    }
+  ]
+}

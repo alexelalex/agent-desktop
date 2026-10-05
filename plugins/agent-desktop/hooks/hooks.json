@@ -1,0 +1,55 @@
+{
+  "description": "Tells Agent Desktop about this session, so it lists it and shows its transcript.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "curl -s -m 2 -H \"x-agent-desktop-driver: ${AGENT_DESKTOP_DRIVER:-}\" -H \"x-claude-pid: ${CLAUDE_PID:-$PPID}\" --data-binary @- \"http://127.0.0.1:${AGENT_DESKTOP_MCP_PORT:-4040}/hooks\" >/dev/null 2>&1 || true"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "curl -s -m 2 -H \"x-agent-desktop-driver: ${AGENT_DESKTOP_DRIVER:-}\" -H \"x-claude-pid: ${CLAUDE_PID:-$PPID}\" --data-binary @- \"http://127.0.0.1:${AGENT_DESKTOP_MCP_PORT:-4040}/hooks\" >/dev/null 2>&1 || true"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "curl -s -m 2 -H \"x-agent-desktop-driver: ${AGENT_DESKTOP_DRIVER:-}\" -H \"x-claude-pid: ${CLAUDE_PID:-$PPID}\" --data-binary @- \"http://127.0.0.1:${AGENT_DESKTOP_MCP_PORT:-4040}/hooks\" >/dev/null 2>&1 || true"
+          }
+        ]
+      }
+    ],
+    "StopFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "curl -s -m 2 -H \"x-agent-desktop-driver: ${AGENT_DESKTOP_DRIVER:-}\" -H \"x-claude-pid: ${CLAUDE_PID:-$PPID}\" --data-binary @- \"http://127.0.0.1:${AGENT_DESKTOP_MCP_PORT:-4040}/hooks\" >/dev/null 2>&1 || true"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "curl -s -m 2 -H \"x-agent-desktop-driver: ${AGENT_DESKTOP_DRIVER:-}\" -H \"x-claude-pid: ${CLAUDE_PID:-$PPID}\" --data-binary @- \"http://127.0.0.1:${AGENT_DESKTOP_MCP_PORT:-4040}/hooks\" >/dev/null 2>&1 || true"
+          }
+        ]
+      }
+    ]
+  }
+}

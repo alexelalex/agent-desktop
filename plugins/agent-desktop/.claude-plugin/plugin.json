@@ -1,0 +1,9 @@
+{
+  "name": "agent-desktop",
+  "displayName": "Agent Desktop",
+  "version": "0.2.0",
+  "description": "Shows Claude Code sessions in Agent Desktop and lets them drive its UI over MCP: plans, activity, artifacts, approvals and tasks.",
+  "author": {
+    "name": "Agent Desktop"
+  }
+}

@@ -1,0 +1,17 @@
+appId: dev.agent-desktop.app
+productName: Agent Desktop
+directories:
+  output: release
+# Vite bundles the renderer and the main process, so no node_modules ship.
+files:
+  - dist/**
+  - dist-electron/**
+  - package.json
+  - '!node_modules/**'
+mac:
+  target: dmg
+  category: public.app-category.developer-tools
+win:
+  target: nsis
+linux:
+  target: AppImage

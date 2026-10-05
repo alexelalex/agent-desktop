@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "desktop": {
+      "type": "sse",
+      "url": "http://127.0.0.1:${AGENT_DESKTOP_MCP_PORT:-4040}/sse",
+      "headersHelper": "printf '{\"x-claude-pid\":\"%s\"}' \"${CLAUDE_PID:-$PPID}\""
+    }
+  }
+}

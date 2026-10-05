@@ -1,0 +1,11 @@
+node_modules
+dist
+*.local
+.DS_Store
+dist-electron
+release
+e2e/.out
+
+# Personal Claude Code settings (absolute paths, local permissions)
+.claude/settings.json
+.claude/settings.local.json

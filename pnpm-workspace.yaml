@@ -1,0 +1,5 @@
+# Skip packages published less than a week ago (supply-chain hygiene).
+minimumReleaseAge: 10080
+# Electron downloads its binary in a postinstall script.
+onlyBuiltDependencies:
+  - electron

@@ -1,0 +1,19 @@
+import { MoonIcon, SunIcon } from 'lucide-react'
+import { Button } from '@/components/ui/button'
+import { setTheme, useTheme } from '@/lib/theme'
+
+export function ThemeToggle({ className }: { className?: string }) {
+  const theme = useTheme()
+  const next = theme === 'dark' ? 'light' : 'dark'
+  return (
+    <Button
+      size="icon"
+      variant="ghost"
+      className={className}
+      aria-label={`Switch to ${next} mode`}
+      onClick={() => setTheme(next)}
+    >
+      {theme === 'dark' ? <SunIcon /> : <MoonIcon />}
+    </Button>
+  )
+}
