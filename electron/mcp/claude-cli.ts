@@ -175,11 +175,12 @@ export function turnArgs(options: {
   port: number;
   /** A worktree task: edits inside it don't ask. */
   acceptEdits?: boolean;
-  addDir?: string;
+  /** Folders the session works in besides its own: a task's worktree, a bound branch's. */
+  addDirs?: string[];
   /** Tools the session runs without, e.g. a dig's edit tools. */
   disallowedTools?: string[];
 }): string[] {
-  const { sessionId, runId, resume, resumeAt, port, acceptEdits, addDir, disallowedTools } =
+  const { sessionId, runId, resume, resumeAt, port, acceptEdits, addDirs, disallowedTools } =
     options;
   const hook = [
     {
@@ -233,7 +234,8 @@ export function turnArgs(options: {
     "--permission-prompt-tool",
     PERMISSION_TOOL,
     ...(acceptEdits ? ["--permission-mode", "acceptEdits"] : []),
-    ...(addDir ? ["--add-dir", addDir] : []),
+    // Variadic, and last: nothing after it is taken for a folder.
+    ...(addDirs?.length ? ["--add-dir", ...addDirs] : []),
   ];
 }
 

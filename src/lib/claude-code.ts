@@ -408,3 +408,17 @@ export const attemptsOnLine = (attempts: ReplacedAttempt[] = []) =>
   attempts
     .map((attempt, index) => ({ ...attempt, index }))
     .filter(a => !attempts.slice(a.index + 1).some(later => later.at < a.at))
+
+/** A session's tokens as of an assistant message: the latest request's context, and output so far. */
+export interface TokenUsage {
+  context: number
+  output: number
+  model?: string
+}
+
+export function sessionUsage(messages: UIMessage[]): TokenUsage | undefined {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const usage = (messages[i].metadata as { usage?: TokenUsage } | undefined)?.usage
+    if (usage) return usage
+  }
+}

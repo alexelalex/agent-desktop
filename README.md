@@ -166,6 +166,39 @@ you accept goes into the prompt the task gets, on top of the agent's text. Digs 
 time beside the task queue; a new dig replaces the last one, and a dig whose suggestions are
 all settled folds away.
 
+**Send to a new session** (the split button beside Send, or ⌘⇧↵) takes what you typed in a
+session's composer to a task of its own under that session, in the same folder, and starts it
+right away, past the queue. The new session knows only what you send. Tick **Add context from this
+conversation** and Claude (Opus, one run with no tools) reads the conversation so far and writes
+only what the new session needs for that prompt, which you can edit or rewrite before starting;
+the choice is remembered. The context goes in front of the prompt, folded in the new session's
+chat, and the session can still read its parent with `ui_read_parent`.
+
+**Branches** gather tasks into PRs. The ⎇ button on a session's header, or on its sidebar row,
+opens its branch menu; a session with a bound branch keeps its ⎇ showing in the list. Every item there writes a prompt into the composer for you to edit and
+send: the agent does the git work, and the app only reads git.
+
+- **Bind branch…** picks a local branch of the session's repo, or of its tasks' repos, one per
+  repo, with an optional commit prefix such as `DEV-22044`. **New branch…** asks the agent to
+  create one in its own worktree, and binds it when you send that prompt. A bound branch's line
+  under the title shows how many tasks are merged, whether it's pushed, and how far it is behind
+  the default branch as of the last fetch. Its worktree joins the session's turns as `--add-dir`.
+- **Merge ▸** lists the task branches under the session. A task is ready once it completed with
+  commits and no uncommitted changes. The prompt has the agent `cherry-pick -x` them into the bound
+  branch's worktree, in artifact order, then run each brief's "Done when" checks on the combined
+  branch. A task reads merged once each of its commits is there, even after a pick changed it.
+- **Split out** gives a ready task its own remote branch and draft PR instead, optionally after
+  filing a Jira ticket, when the session's Claude Code has a Jira tool. Split a task before
+  merging it.
+- **Sync with base**, **Run tests**, **Push**, **Open PR…**, **Update PR description** and
+  **Address review comments** act on the bound branch. A task's own menu does the same on its
+  branch, and **Merge into ⎇ …** sends it up into its parent's branch from the task session.
+- On the artifact, an action's status reads `merged ⎇ <branch>` or its PR, and its ⋯ menu offers
+  Merge, Split out and **Launch on ⎇ …**: the launch dialog starts new tasks from the bound
+  branch, so a fix is tried on top of the batch.
+- The agent reports what it did with `ui_report_branch`, which records split-out remotes, rebased
+  bases and PR links. A PR's state is what was reported: the app never calls GitHub.
+
 `node scripts/task-metrics.mjs` prints how actions are used: how many get launched, how
 often prompts are edited, and how long dispatching takes.
 
@@ -175,7 +208,8 @@ When an agent ends its turn in the session you're viewing, up to three replies y
 send show above the composer. A click puts one in the composer, with any part you'll likely
 change selected; nothing is sent until you press Enter. In an empty composer, Tab takes the
 first and ⌥1–3 pick by position; × hides them for the turn. They don't show while an approval
-or question waits, in a dig, or where you can't reply.
+or question waits, in a dig, or where you can't reply. A new chat gets openers the same way,
+from your recent sessions' titles and the tenants connected.
 
 One Claude Code process the app runs writes them, on Sonnet 5.5 with thinking off. It has no
 built-in tools, none of your settings or plugins, and only its own three MCP tools:

@@ -247,6 +247,7 @@ function Home() {
                   })
                 }
                 onBack={back}
+                branch={view.branch}
               />
             ) : null}
           </main>

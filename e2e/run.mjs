@@ -2,7 +2,7 @@
 // Build first (`pnpm build`); the app under test is dist/ and dist-electron/.
 import { spawn } from 'node:child_process'
 
-const ALL = ['smoke', 'plugins', 'runs', 'agents', 'triggers', 'client-tools', 'artifacts', 'notifications', 'replay', 'tasks', 'task-changes', 'replies']
+const ALL = ['smoke', 'plugins', 'runs', 'agents', 'triggers', 'client-tools', 'artifacts', 'notifications', 'replay', 'tasks', 'task-changes', 'replies', 'branches', 'spinoff']
 const suites = process.argv.length > 2 ? process.argv.slice(2) : ALL
 
 const summary = []

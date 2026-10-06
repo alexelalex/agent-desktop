@@ -147,7 +147,7 @@ export async function ask(page, text) {
   await idle(page)
 }
 export async function newChat(page) {
-  await page.getByRole('button', { name: 'New session' }).click()
+  await page.getByRole('button', { name: 'New session', exact: true }).click()
 }
 
 /** What a run published, as text: its artifacts' contents. */

@@ -13,6 +13,8 @@ export const MAX_NOTES = 12
 export const MAX_NOTE = 160
 export const REPLY_KINDS: ReplyKind[] = ['answer', 'next', 'redirect']
 export const NONE_REASONS = ['working', 'nothing-to-answer', 'unclear']
+/** A new chat's turn, before its first message: what the user may open with. */
+export const START_TURN = 'start'
 
 export const SUGGESTER_MODELS = [
   { id: 'claude-sonnet-5-5', label: 'Sonnet 5.5' },

@@ -13,7 +13,7 @@ const chip = (page, name) => rail(page).getByRole('button', { name, exact: true 
 const box = page => page.locator('textarea:enabled').first()
 // The agent's turn says `text`; the suggester follows `plan` for it.
 const says = (text, plan) => fake('steps', [['say', `${text} [fake-suggest:${JSON.stringify(plan)}]`]])
-const requests = since => fakeLog(since).filter(e => e.event === 'suggester-request').map(e => e.request)
+const requests = (since, type = 'suggest') => fakeLog(since).filter(e => e.event === 'suggester-request' && e.request.type === type).map(e => e.request)
 const calls = since => fakeLog(since).filter(e => e.event === 'suggester-call')
 const spawns = since => fakeLog(since).filter(e => e.event === 'spawn' && e.argv.includes('--system-prompt'))
 const setup = profile => JSON.parse(readFileSync(`${profile}/suggester.json`, 'utf8'))
@@ -24,10 +24,19 @@ const send = async (page, text) => {
 
 const profile = mkdtempSync(path.join(OUT, 'profile-'))
 writeFileSync(`${profile}/suggester.json`, JSON.stringify({ enabled: true }))
+const start = Date.now()
 const { app, page } = await launchWithClaudeCode({ profile })
 
+// A new chat: openers from the suggester, in place of fixed examples.
+await page.getByRole('button', { name: 'New session', exact: true }).click()
+check('start: a new chat gets openers', await visible(chip(page, 'Go on'), 20_000))
+const opener = requests(start, 'start')[0]
+check('start: the request holds recent sessions and tenants, no conversation', Array.isArray(opener?.recent) && Array.isArray(opener?.tenants) && opener.conversation === undefined, JSON.stringify(opener))
+await box(page).press('Tab')
+check('start: Tab takes the opener', (await box(page).inputValue()) === 'go on')
+await box(page).fill('')
+
 // A turn that asks something: the rail shows what the suggester sent.
-const start = Date.now()
 const run = await startSession(page, profile, `Check the buckets. ${says('Should I block it or ticket it?', [['suggest', { replies: [
   { label: 'Block it now', text: 'block public access on acme-backups now', kind: 'answer' },
   { label: 'Ticket it first', text: 'open a ticket first', kind: 'answer' },
@@ -35,6 +44,8 @@ const run = await startSession(page, profile, `Check the buckets. ${says('Should
 ] }]])}`)
 check('rail: shows the suggested replies', await visible(chip(page, 'Block it now'), 20_000))
 check('rail: a chip per reply', (await rail(page).getByRole('button').count()) === 4)
+const meter = (await page.getByLabel('Token usage').textContent().catch(() => '')) ?? ''
+check('usage: the composer shows the session\'s context tokens', /^[\d.,]+K? context$/.test(meter), meter)
 
 const [spawn] = spawns(start)
 const argv = spawn?.argv ?? []
@@ -158,6 +169,13 @@ const notice = await until(() => /no longer exists/.test(sessions(profile).find(
 check('gone: a reply says the folder is gone', notice === `This session's folder no longer exists: ${folder}`, notice)
 check('gone: nothing is spawned for it', !fakeLog(eighth).some(e => e.event === 'spawn' && e.sessionId === run))
 renameSync(`${folder}-moved`, folder)
+
+// Openers know the sessions so far.
+const ninth = Date.now()
+await page.getByRole('button', { name: 'New session', exact: true }).click()
+await until(() => requests(ninth, 'start').length > 0, 20_000)
+const recent = requests(ninth, 'start')[0]?.recent ?? []
+check('start: recent sessions go by title', recent.some(r => r.title.startsWith('Check the buckets.') && r.engine === 'claude-code'), JSON.stringify(recent).slice(0, 300))
 
 await app.close()
 const failed = results.filter(ok => !ok).length

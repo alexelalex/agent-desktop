@@ -1,5 +1,6 @@
 import { createContext, useContext, type ReactNode } from 'react'
 import { EllipsisIcon, PencilLineIcon, PlayIcon } from 'lucide-react'
+import { splitBlock } from '@/components/BranchMenu'
 import { RunStatusIcon, runStatusLabel } from '@/components/RunStatus'
 import { Button } from '@/components/ui/button'
 import { Spinner } from '@/components/ui/spinner'
@@ -17,7 +18,7 @@ import {
   type ArtifactAction,
   type ClaudeCodeArtifact,
 } from '@/lib/claude-code'
-import type { RunSummary } from '@/lib/desktop'
+import type { BoundBranch, BranchRow, RunSummary } from '@/lib/desktop'
 import { effectivePrompt, suggestionsOf, waiting } from '@/lib/dig'
 import { actionDigs, actionTasks, isActive, selectable, shownTask, taskOf } from '@/lib/tasks'
 import { cn } from '@/lib/utils'
@@ -43,6 +44,16 @@ export interface ActionsContextValue {
   onReview: (actionId: string) => void
   /** Why the last dig didn't start. */
   notice?: string
+  /** The session's bound branches and the task branches under it, once it has a binding. */
+  branch?: {
+    bound: BoundBranch[]
+    /** By task run id. */
+    rows: Map<string, BranchRow>
+    /** Why no branch item can go now, e.g. the session is mid-turn. */
+    blocked?: string
+    onMerge: (row: BranchRow) => void
+    onSplit: (row: BranchRow) => void
+  }
 }
 
 export const ActionsContext = createContext<ActionsContextValue | undefined>(undefined)
@@ -76,6 +87,17 @@ export function ActionControl(props: { action: ArtifactAction }) {
   const changed =
     newest && prompt !== undefined && taskOf(newest)?.promptHash !== promptHash(prompt)
   const stoppable = shown && ['running', 'queued', 'awaiting_approval'].includes(shown.status)
+  const { branch } = context
+  const row = shown && branch?.rows.get(shown.id)
+  const target = row && branch?.bound.find(b => b.common === row.common)
+  // A new task starts on the bound branch: the one in its task's repo, or the only one.
+  const launchOn = target ?? (branch?.bound.length === 1 ? branch.bound[0] : undefined)
+  const pr = row?.report?.pr
+  const mergeState = row?.merged && target
+    ? `merged ⎇ ${target.name}`
+    : pr
+      ? `${row?.report?.remote ? 'own ' : 'in '}${pr.number ? `PR #${pr.number}` : 'PR'}`
+      : undefined
   return (
     <span
       data-action={actionKey(artifact.id, action.id)}
@@ -95,12 +117,12 @@ export function ActionControl(props: { action: ArtifactAction }) {
           variant="outline"
           size="xs"
           className="min-w-0"
-          aria-label={`${name} · ${runStatusLabel(shown.status)}${tasks.length > 1 ? ` · ${tasks.length} tasks` : ''}`}
+          aria-label={`${name} · ${runStatusLabel(shown.status)}${mergeState ? ` · ${mergeState}` : ''}${tasks.length > 1 ? ` · ${tasks.length} tasks` : ''}`}
           title={firstLine(taskOf(shown)?.outcome?.answer) ?? runStatusLabel(shown.status)}
           onClick={() => context.onOpen(shown.id)}
         >
           <RunStatusIcon status={shown.status} className="size-3" />
-          <span className="truncate">{runStatusLabel(shown.status)}</span>
+          <span className="truncate">{mergeState ?? runStatusLabel(shown.status)}</span>
           {tasks.length > 1 && <span className="text-muted-foreground">· {tasks.length}</span>}
         </Button>
       ) : (
@@ -170,6 +192,33 @@ export function ActionControl(props: { action: ArtifactAction }) {
           )}
           {stoppable && (
             <DropdownMenuItem onSelect={() => context.onStop(shown.id)}>Stop</DropdownMenuItem>
+          )}
+          {branch && row && target && (
+            <DropdownMenuItem
+              disabled={!!branch.blocked || !row.ready}
+              title={branch.blocked ?? row.reason}
+              onSelect={() => branch.onMerge(row)}
+            >
+              <span className="truncate">Merge into ⎇ {target.name}</span>
+            </DropdownMenuItem>
+          )}
+          {branch && row && (
+            <DropdownMenuItem
+              disabled={!!(branch.blocked ?? splitBlock(row))}
+              title={branch.blocked ?? splitBlock(row)}
+              onSelect={() => branch.onSplit(row)}
+            >
+              Split out into its own PR…
+            </DropdownMenuItem>
+          )}
+          {action.worktree && launchOn && (
+            <DropdownMenuItem
+              disabled={!!disabled}
+              title={disabled ?? `A new task, its worktree from ${launchOn.name}`}
+              onSelect={() => context.onLaunch([action.id])}
+            >
+              <span className="truncate">Launch on ⎇ {launchOn.name}</span>
+            </DropdownMenuItem>
           )}
           <DropdownMenuItem
             disabled={!!disabled || digging}

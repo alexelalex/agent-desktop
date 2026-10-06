@@ -9,7 +9,7 @@ const json = (profile, file) => JSON.parse(readFileSync(`${profile}/${file}`, 'u
 const toolParts = (profile, runId, name) =>
   json(profile, `runs/${runId}.json`).flatMap(m => m.parts).filter(p => p.type === 'dynamic-tool' && p.toolName === name)
 const send = async (page, text) => {
-  await page.getByRole('button', { name: 'New session' }).click()
+  await page.getByRole('button', { name: 'New session', exact: true }).click()
   await page.getByRole('textbox').fill(text)
   await page.getByRole('textbox').press('Enter')
   await page.getByRole('button', { name: 'Stop', exact: true }).waitFor({ timeout: 20_000 }).catch(() => { })

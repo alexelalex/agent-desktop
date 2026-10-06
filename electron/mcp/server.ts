@@ -79,6 +79,7 @@ export class DesktopMcpServer {
     parentOf: (caller: Caller, conversation: boolean) => string;
     tasksOf: (caller: Caller, id?: string) => string;
     suggest: (caller: Caller, changes: unknown) => string;
+    reportBranch: (caller: Caller, args: Record<string, unknown>) => Promise<string>;
   };
   private restorer?: (caller: Caller) => Promise<string>;
   private suggester?: Pick<ReplySuggester, "owns" | "tools" | "call">;
@@ -210,6 +211,7 @@ export class DesktopMcpServer {
           parentOf: (conversation) => tasks.parentOf(caller, conversation),
           tasksOf: (id) => tasks.tasksOf(caller, id),
           suggest: (changes) => tasks.suggest(caller, changes),
+          reportBranch: (args) => tasks.reportBranch(caller, args),
         },
       });
     }

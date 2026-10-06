@@ -16,10 +16,16 @@ import {
   replaceProblem,
 } from "@/lib/dig";
 import type {
+  BoundBranch,
+  BranchAction,
+  BranchReport,
+  BranchRow,
+  BranchView,
   ClaudeCodeAgent,
   FileDiff,
   LaunchRequest,
   LaunchResult,
+  LocalBranch,
   PromptSuggestion,
   ReplacedAttempt,
   RetryPreflight,
@@ -27,6 +33,7 @@ import type {
   RunSnapshot,
   RunStatus,
   RunSummary,
+  SpinoffRequest,
   TaskLink,
   TaskPreview,
   WorktreeState,
@@ -56,6 +63,7 @@ import { getPlugin } from "../plugins/store";
 import { readJson, writeJson } from "../store";
 import { SessionAgents } from "./agents";
 import { approvalHub, AUTO_APPROVED } from "./approval-hub";
+import { writeContext } from "./spinoff-context";
 import {
   claudeCodeInfo,
   configDir,
@@ -79,10 +87,35 @@ import {
   worktreeChanges,
   worktreeFileDiff,
 } from "./changes";
+import {
+  commentsPrompt,
+  mergePrompt,
+  newBranchPrompt,
+  openPrPrompt,
+  type PromptSource,
+  type PromptTarget,
+  pushPrompt,
+  splitPrompt,
+  syncPrompt,
+  testPrompt,
+  updatePrPrompt,
+} from "./branch-prompts";
+import {
+  branchExists,
+  branchState,
+  commitsSince,
+  defaultBase,
+  doneWhen,
+  filesSince,
+  localBranches,
+  mergedInto,
+  testFiles,
+  worktreeOf,
+} from "./branches";
 import { DIG_DISALLOWED, digMarker, digNote, digPrompt, MAX_RUNNING_DIGS } from "./dig";
-import { inspect } from "./git";
+import { git, inspect } from "./git";
 import { loadPluginOperations } from "./tenant-bridge";
-import { originNote, toolOf, Transcript, withRegenerateNote } from "./transcript";
+import { originNote, spinoffNote, toolOf, Transcript, withRegenerateNote } from "./transcript";
 import type { ApprovalRequest } from "./types";
 import {
   createWorktree,
@@ -125,6 +158,16 @@ const ANSWER_CHARS = 8_000;
 const ANSWER_CHARS_ONE = 50_000;
 const CONVERSATION_CHARS = 50_000;
 const NOT_STARTED = "This task hasn't sent its first message yet. Use Start now.";
+// A tool of the session's Claude Code that files Jira tickets.
+const TICKET_TOOL = /atlassian|jira/i;
+const STATUS_WORDS: Record<RunStatus, string> = {
+  queued: "queued",
+  running: "running",
+  awaiting_approval: "awaiting approval",
+  completed: "completed",
+  failed: "failed",
+  stopped: "stopped",
+};
 const notTaken = (texts: string[]) =>
   `The terminal session didn't take ${texts.map((t) => `"${t}"`).join(", ") || "the message"}. Start Claude Code with: ${CHANNELS_COMMAND}`;
 
@@ -378,6 +421,8 @@ export class ClaudeCodeSessions {
     string,
     { runId: string; toolUseId: string; reason: string; question: boolean }
   >();
+  /** A spin-off's context being written, by the session it reads. */
+  private contexts = new Map<string, AbortController>();
 
   constructor(
     private readonly patch: (patch: RunPatch) => void,
@@ -652,7 +697,16 @@ export class ClaudeCodeSessions {
               parentRunId,
               actionId,
             );
-            return { actionId, cwd, repo: checkout.repo, branch, base, commit: checkout.commit, dirty: checkout.dirty };
+            return {
+              actionId,
+              cwd,
+              repo: checkout.repo,
+              common: checkout.common,
+              branch,
+              base,
+              commit: checkout.commit,
+              dirty: checkout.dirty,
+            };
           } catch (error) {
             return { actionId, cwd, error: (error as Error).message };
           }
@@ -689,7 +743,7 @@ export class ClaudeCodeSessions {
         const prompt = this.promptOf(parent, artifact, action).text;
         let worktree: TaskLink["worktree"];
         if (action.worktree) {
-          const base = action.base ?? "HEAD";
+          const base = request.base?.trim() || action.base || "HEAD";
           const key = `${cwd}\0${base}`;
           if (!checkouts.has(key)) checkouts.set(key, inspect(cwd, base));
           const checkout = await checkouts.get(key)!;
@@ -801,7 +855,7 @@ export class ClaudeCodeSessions {
         const worktree = await createWorktree({
           taskId: id,
           parentId: task.parentRunId,
-          actionId: task.actionId,
+          actionId: task.actionId!,
           worktree: task.worktree,
           record: (w) => {
             this.setTask(session, { worktree: w });
@@ -845,6 +899,13 @@ export class ClaudeCodeSessions {
     const task = session.task!;
     if (task.kind === "dig") return this.digNoteOf(session);
     const parent = this.sessions.get(task.parentRunId);
+    if (task.kind === "spinoff")
+      return spinoffNote({
+        parentId: task.parentRunId,
+        parentTitle: parent?.summary.title ?? "a removed session",
+        depth: task.depth,
+        context: task.context,
+      });
     if (parent) this.load(parent);
     const artifact = parent
       ? claudeCodeArtifacts(parent.transcript.messages).find((a) => a.id === task.artifactId)
@@ -858,15 +919,93 @@ export class ClaudeCodeSessions {
     return originNote({
       parentId: task.parentRunId,
       parentTitle: parent?.summary.title ?? "a removed session",
-      artifactId: task.artifactId,
-      artifactTitle: artifact?.title ?? task.artifactId,
-      actionId: task.actionId,
+      artifactId: task.artifactId!,
+      artifactTitle: artifact?.title ?? task.artifactId!,
+      actionId: task.actionId!,
       depth: task.depth,
       worktree:
         worktree?.branch
           ? { branch: worktree.branch, base: worktree.base, commit: worktree.commit, earlier }
           : undefined,
     });
+  }
+
+  // ---- Spin-offs: a prompt from a session's message box, run as a session under it.
+
+  /** What the session's conversation says that bears on `prompt`; empty when nothing does. */
+  async writeContext(parentRunId: string, prompt: string): Promise<string> {
+    const parent = this.sessions.get(parentRunId);
+    if (!parent) throw new Error("The session was removed.");
+    if (!prompt.trim()) throw new Error("Write the prompt first.");
+    this.cancelContext(parentRunId);
+    const controller = new AbortController();
+    this.contexts.set(parentRunId, controller);
+    try {
+      const { found } = await claudeCodeInfo();
+      if (!found) throw new Error("Claude Code isn't found. Set it up in Options.");
+      this.load(parent);
+      return await writeContext({
+        command: found.path,
+        title: parent.summary.title,
+        cwd: parent.summary.claudeCode?.cwd ?? "",
+        messages: parent.transcript.messages.slice(0, shownOf(parent)),
+        prompt: prompt.trim(),
+        signal: controller.signal,
+      });
+    } finally {
+      if (this.contexts.get(parentRunId) === controller) this.contexts.delete(parentRunId);
+    }
+  }
+
+  cancelContext(parentRunId: string) {
+    this.contexts.get(parentRunId)?.abort();
+    this.contexts.delete(parentRunId);
+  }
+
+  /** Starts the prompt as a session under this one, now: the user sent it, so it skips the queue. */
+  spinoff(parentRunId: string, request: SpinoffRequest): string {
+    const parent = this.sessions.get(parentRunId);
+    if (!parent) throw new Error("The session was removed.");
+    if (parent.task?.kind === "dig") throw new Error("A dig can't start sessions.");
+    const depth = parent.task?.depth ?? 0;
+    if (depth >= 2) throw new Error("Sub-tasks can't start sessions under them.");
+    const prompt = request.prompt.trim();
+    const title = request.title.trim();
+    if (!prompt || !title) throw new Error("A session needs a title and a prompt.");
+    const cwd = parent.summary.claudeCode?.cwd || sessionCwd();
+    if (!isDirectory(cwd)) throw new Error(`Folder not found: ${cwd}`);
+    const context = request.context?.trim();
+    const now = Date.now();
+    const id = randomUUID();
+    const session = new Session(
+      {
+        id,
+        trigger: "manual",
+        title,
+        status: "running",
+        toolCalls: 0,
+        createdAt: now,
+        updatedAt: now,
+        claudeCode: {
+          cwd,
+          live: false,
+          task: {
+            kind: "spinoff",
+            parentRunId,
+            depth: (depth + 1) as 1 | 2,
+            launchedAt: now,
+            promptEdited: false,
+            promptHash: promptHash(prompt),
+            ...(context && { context }),
+          },
+        },
+      },
+      "",
+    );
+    session.start = { text: prompt };
+    this.sessions.set(id, session);
+    this.begin(session);
+    return id;
   }
 
   // ---- Digs: read-only sessions into an action, whose suggestions go on top of its prompt.
@@ -978,7 +1117,7 @@ export class ClaudeCodeSessions {
   private async digNoteOf(session: Session): Promise<string> {
     const task = session.task!;
     const parent = this.sessions.get(task.parentRunId);
-    const found = parent && this.actionOf(parent, task.artifactId, task.actionId);
+    const found = parent && this.actionOf(parent, task.artifactId!, task.actionId!);
     const action = found?.action;
     const cwd = action?.cwd ?? parent?.summary.claudeCode?.cwd ?? session.summary.claudeCode!.cwd;
     let worktree: Parameters<typeof digNote>[0]["worktree"];
@@ -990,7 +1129,7 @@ export class ClaudeCodeSessions {
         (await nextBranch(
           { repo: checkout.repo, common: checkout.common, base, commit: checkout.commit!, source: checkout.top },
           task.parentRunId,
-          task.actionId,
+          task.actionId!,
         ).catch(() => undefined));
       worktree = { repo: checkout?.repo ?? path.basename(cwd), base, commit: checkout?.commit, branch };
     }
@@ -1011,9 +1150,9 @@ export class ClaudeCodeSessions {
       runId: session.summary.id,
       parentId: task.parentRunId,
       parentTitle: parent?.summary.title ?? "a removed session",
-      artifactId: task.artifactId,
-      artifactTitle: found?.artifact.title ?? task.artifactId,
-      actionId: task.actionId,
+      artifactId: task.artifactId!,
+      artifactTitle: found?.artifact.title ?? task.artifactId!,
+      actionId: task.actionId!,
       actionTitle: action?.title ?? session.summary.title,
       forked: !!task.fork,
       cwd,
@@ -1056,7 +1195,7 @@ export class ClaudeCodeSessions {
     if (!session || task?.kind !== "dig") throw new Error("Only a dig suggests prompt changes.");
     const parent = task.parentRemoved ? undefined : this.sessions.get(task.parentRunId);
     if (!parent) throw new Error("The parent session was removed.");
-    const found = this.actionOf(parent, task.artifactId, task.actionId);
+    const found = this.actionOf(parent, task.artifactId!, task.actionId!);
     if (!found) throw new Error("Its action is gone");
     const { agent, text: prompt } = this.promptOf(parent, found.artifact, found.action);
     if (!Array.isArray(changes)) throw new Error("changes must be an array.");
@@ -1092,8 +1231,8 @@ export class ClaudeCodeSessions {
     const added = list.map(
       (c, i): PromptSuggestion => ({
         id: randomUUID().slice(0, 8),
-        artifactId: task.artifactId,
-        actionId: task.actionId,
+        artifactId: task.artifactId!,
+        actionId: task.actionId!,
         digRunId: session.summary.id,
         agentHash: promptHash(agent),
         kind: c.kind,
@@ -1228,6 +1367,519 @@ export class ClaudeCodeSessions {
     return states;
   }
 
+  // ---- Branches: what a session binds, and the task branches under it that merge up.
+
+  private setClaudeCode(session: Session, change: Partial<NonNullable<RunSummary["claudeCode"]>>) {
+    session.summary = {
+      ...session.summary,
+      claudeCode: { ...session.summary.claudeCode!, ...change },
+    };
+  }
+
+  /** The session's bindings; a task's own worktree branch counts in its repo. */
+  private bindingsOf(session: Session): (BoundBranch & { implicit?: boolean })[] {
+    const worktree = session.task?.worktree;
+    const own =
+      worktree?.branch && worktree.path && session.task?.kind !== "dig"
+        ? [
+            {
+              common: worktree.common,
+              repo: worktree.repo,
+              name: worktree.branch,
+              boundAt: session.task!.launchedAt,
+              report: session.task!.report,
+              implicit: true,
+            },
+          ]
+        : [];
+    const explicit = (session.summary.claudeCode?.branches ?? []).filter(
+      (b) => !own.some((o) => o.common === b.common),
+    );
+    return [...own, ...explicit];
+  }
+
+  /** A task's upstream: the nearest ancestor's binding in the task's repo. */
+  private upstreamOf(session: Session): (BoundBranch & { owner: string }) | undefined {
+    const common = session.task?.worktree?.common;
+    let current = session;
+    for (let depth = 0; common && depth < 10; depth++) {
+      const task = current.task;
+      const parent = task && !task.parentRemoved ? this.sessions.get(task.parentRunId) : undefined;
+      if (!parent) return undefined;
+      const bound = this.bindingsOf(parent).find((b) => b.common === common);
+      if (bound) return { ...bound, owner: parent.summary.id };
+      current = parent;
+    }
+    return undefined;
+  }
+
+  /** A session without a branch of its own acts on its nearest ancestor's, in repos it binds none in. */
+  private inheritedOf(session: Session): (BoundBranch & { implicit?: boolean; owner: string })[] {
+    if (session.task?.kind === "dig" || session.task?.worktree?.branch) return [];
+    const own = new Set(this.bindingsOf(session).map((b) => b.common));
+    const found = new Map<string, BoundBranch & { implicit?: boolean; owner: string }>();
+    let current = session;
+    for (let depth = 0; depth < 10; depth++) {
+      const task = current.task;
+      const parent = task && !task.parentRemoved ? this.sessions.get(task.parentRunId) : undefined;
+      if (!parent) break;
+      for (const b of this.bindingsOf(parent))
+        if (!own.has(b.common) && !found.has(b.common)) found.set(b.common, { ...b, owner: parent.summary.id });
+      current = parent;
+    }
+    return [...found.values()];
+  }
+
+  // A process takes its folders when it starts: an idle one ends, so the next message starts one with them.
+  private restartIdle(session: Session) {
+    if (session.turn && !session.busy && !session.turn.stdin.writableEnded) session.turn.stdin.end();
+  }
+
+  // The worktrees of the session's own bindings, and of those it inherits: its turns may edit them.
+  private async boundWorktrees(session: Session): Promise<string[]> {
+    const list = [...(session.summary.claudeCode?.branches ?? []), ...this.inheritedOf(session)];
+    const found = await Promise.all(
+      list.map((b) => worktreeOf(b.common, b.name).catch(() => undefined)),
+    );
+    return found.filter((dir): dir is string => !!dir);
+  }
+
+  /** From the init event: whether the session's Claude Code can file tickets. */
+  private noteTools(session: Session, tools: unknown) {
+    if (!Array.isArray(tools)) return;
+    const tickets =
+      tools.some((t) => typeof t === "string" && TICKET_TOOL.test(t) && !/__authenticate$/.test(t)) ||
+      undefined;
+    if (session.summary.claudeCode?.tickets === tickets) return;
+    this.setClaudeCode(session, { tickets });
+    this.update(session, { changed: [] }, true);
+  }
+
+  // What the merge and split prompts say about a task's branch.
+  private async sourceOf(task: Session): Promise<PromptSource> {
+    const link = task.task!;
+    const worktree = link.worktree!;
+    const branch = worktree.branch!;
+    const commits = await commitsSince(worktree.common, worktree.commit, branch);
+    const files = await filesSince(worktree.common, worktree.commit, branch);
+    // The brief as launched, edits included; the action's, if the transcript is gone.
+    this.load(task);
+    const first = task.transcript.messages.find((m) => m.role === "user");
+    const parent = this.sessions.get(link.parentRunId);
+    const found = parent && this.actionOf(parent, link.artifactId!, link.actionId!);
+    const brief =
+      (first && textOf(first)) ||
+      task.start?.text ||
+      (found ? this.promptOf(parent!, found.artifact, found.action).text : "");
+    return {
+      title: task.summary.title,
+      branch,
+      worktree: worktree.path,
+      base: worktree.commit,
+      commits,
+      files,
+      doneWhen: doneWhen(brief),
+      tests: testFiles(files),
+    };
+  }
+
+  // A task branch as a Merge menu lists it, against `target` in its repo.
+  private async rowOf(
+    task: Session,
+    target: BoundBranch | undefined,
+    why?: string,
+  ): Promise<BranchRow> {
+    const link = task.task!;
+    const worktree = link.worktree!;
+    const branch = worktree.branch!;
+    const exists = await branchExists(worktree.common, branch);
+    const commits = exists ? await commitsSince(worktree.common, worktree.commit, branch) : [];
+    const merged =
+      !!target &&
+      target.name !== branch &&
+      exists &&
+      (await mergedInto(
+        worktree.common,
+        worktree.commit,
+        branch,
+        target.name,
+        commits.map((c) => c.hash),
+      ).catch(() => false));
+    const state = exists ? await worktreeState(worktree).catch(() => undefined) : undefined;
+    const dirty = !!state?.exists && state.dirty;
+    const status = task.summary.status;
+    const reason = !exists
+      ? "branch gone"
+      : merged
+        ? "merged"
+        : (why ??
+          (link.report?.remote
+            ? "split out"
+            : status !== "completed"
+              ? STATUS_WORDS[status]
+              : commits.length === 0
+                ? "no commits"
+                : dirty
+                  ? "uncommitted changes"
+                  : !target
+                    ? `${worktree.repo} has no bound branch`
+                    : undefined));
+    return {
+      runId: task.summary.id,
+      title: task.summary.title,
+      artifactId: link.artifactId!,
+      actionId: link.actionId!,
+      depth: link.depth,
+      repo: worktree.repo,
+      common: worktree.common,
+      branch,
+      status,
+      dirty,
+      commits: commits.length,
+      merged,
+      ready: !reason,
+      reason,
+      report: link.report,
+    };
+  }
+
+  // Every task branch under the session; only each action's newest direct task can merge here.
+  private async rowsOf(session: Session): Promise<BranchRow[]> {
+    const bindings = this.bindingsOf(session);
+    const id = session.summary.id;
+    const tasks = this.descendants(id).filter(
+      (s) => s.task!.kind !== "dig" && s.task!.worktree?.branch,
+    );
+    const newest = new Map<string, Session>();
+    for (const s of tasks) {
+      if (s.task!.parentRunId !== id) continue;
+      const key = `${s.task!.artifactId}/${s.task!.actionId}`;
+      const seen = newest.get(key);
+      if (!seen || s.task!.launchedAt >= seen.task!.launchedAt) newest.set(key, s);
+    }
+    return Promise.all(
+      tasks.map((s) => {
+        const link = s.task!;
+        const target = bindings.find((b) => b.common === link.worktree!.common);
+        const why =
+          link.parentRunId !== id
+            ? "sub-task: it merges into its task's branch"
+            : newest.get(`${link.artifactId}/${link.actionId}`) !== s
+              ? "earlier attempt"
+              : undefined;
+        return this.rowOf(s, target, why);
+      }),
+    );
+  }
+
+  /** The session's branches and the task branches under it, as git has them now. */
+  async branchView(runId: string): Promise<BranchView> {
+    const session = this.sessions.get(runId);
+    if (!session?.summary.claudeCode) throw new Error(`No Claude Code session ${runId}.`);
+    // A branch New branch… asked for counts as made once it exists.
+    const creating = (session.summary.claudeCode.branches ?? []).filter((b) => b.creating);
+    for (const b of creating)
+      if (await branchExists(b.common, b.name)) this.settleCreating(session, b.common);
+    const bases = new Map<string, Promise<string | undefined>>();
+    const baseOf = (common: string) => {
+      if (!bases.has(common)) bases.set(common, defaultBase(common).catch(() => undefined));
+      return bases.get(common)!;
+    };
+    const bindings = this.bindingsOf(session);
+    const bound = await Promise.all(
+      bindings.map(async (b) => ({
+        ...b,
+        state: await branchState(b.common, b.name, await baseOf(b.common)),
+      })),
+    );
+    const up = this.upstreamOf(session);
+    const upstream = up && {
+      ...up,
+      state: await branchState(up.common, up.name, await baseOf(up.common)),
+    };
+    const self =
+      session.task?.worktree?.branch && session.task.kind !== "dig"
+        ? await this.rowOf(session, up)
+        : undefined;
+    const inherited = await Promise.all(
+      this.inheritedOf(session).map(async (b) => ({
+        ...b,
+        ownerTitle: this.sessions.get(b.owner)?.summary.title ?? "",
+        state: await branchState(b.common, b.name, await baseOf(b.common)),
+      })),
+    );
+    // Rows only matter under a binding the user made.
+    const rows = session.summary.claudeCode.branches?.length ? await this.rowsOf(session) : [];
+    // Where a binding can be: the session's folder's repo, and every repo its tasks used.
+    const repos = new Map<string, { common: string; repo: string; dir: string }>();
+    const cwd = session.summary.claudeCode.cwd;
+    const here = isDirectory(cwd) ? await inspect(cwd).catch(() => undefined) : undefined;
+    if (here) repos.set(here.common, { common: here.common, repo: here.repo, dir: here.top });
+    for (const s of [session, ...this.descendants(runId)]) {
+      const w = s.task?.worktree;
+      if (w && !repos.has(w.common)) repos.set(w.common, { common: w.common, repo: w.repo, dir: w.source });
+    }
+    for (const b of bindings)
+      if (!repos.has(b.common))
+        repos.set(b.common, { common: b.common, repo: b.repo, dir: path.dirname(b.common) });
+    const defaultBases: Record<string, string> = {};
+    for (const common of repos.keys()) {
+      const base = await baseOf(common);
+      if (base) defaultBases[common] = base;
+    }
+    return { bound, upstream, self, inherited, rows, repos: [...repos.values()], defaultBases };
+  }
+
+  async localBranches(common: string): Promise<LocalBranch[]> {
+    return localBranches(common);
+  }
+
+  private settleCreating(session: Session, common: string) {
+    const list = session.summary.claudeCode?.branches ?? [];
+    this.setClaudeCode(session, {
+      branches: list.map((b) => (b.common === common ? { ...b, creating: undefined } : b)),
+    });
+    this.update(session, { changed: [] }, true);
+  }
+
+  /** Binds a branch of the repo `dir` is in to the session, in place of its binding there. */
+  async bindBranch(
+    runId: string,
+    binding: { dir: string; name: string; prefix?: string; creating?: { base: string } },
+  ) {
+    const session = this.sessions.get(runId);
+    if (!session?.summary.claudeCode) throw new Error(`No Claude Code session ${runId}.`);
+    if (session.task?.kind === "dig") throw new Error("A dig can't have a branch.");
+    const checkout = await inspect(binding.dir).catch(() => {
+      throw new Error(`${binding.dir} isn't inside a git work tree.`);
+    });
+    const name = binding.name.trim();
+    await git(["check-ref-format", "--branch", name], checkout.top).catch(() => {
+      throw new Error(`${name || "An empty name"} isn't a valid branch name.`);
+    });
+    if (session.task?.worktree?.common === checkout.common)
+      throw new Error("A task's own branch is already bound in its repo.");
+    if (!binding.creating && !(await branchExists(checkout.common, name)))
+      throw new Error(`${checkout.repo} has no branch ${name}.`);
+    const list = session.summary.claudeCode.branches ?? [];
+    const previous = list.find((b) => b.common === checkout.common);
+    const bound: BoundBranch = {
+      common: checkout.common,
+      repo: checkout.repo,
+      name,
+      ...(binding.prefix?.trim() && { prefix: binding.prefix.trim() }),
+      ...(binding.creating && { creating: binding.creating }),
+      boundAt: Date.now(),
+      ...(previous?.name === name && previous.report && { report: previous.report }),
+    };
+    this.setClaudeCode(session, {
+      branches: [...list.filter((b) => b.common !== checkout.common), bound],
+    });
+    this.update(session, { changed: [] }, true);
+    this.restartIdle(session);
+  }
+
+  unbindBranch(runId: string, common: string) {
+    const session = this.sessions.get(runId);
+    const list = session?.summary.claudeCode?.branches;
+    if (!session || !list) return;
+    const next = list.filter((b) => b.common !== common);
+    this.setClaudeCode(session, { branches: next.length > 0 ? next : undefined });
+    this.update(session, { changed: [] }, true);
+    this.restartIdle(session);
+  }
+
+  private async promptTarget(session: Session, bound: BoundBranch): Promise<PromptTarget> {
+    const base = await defaultBase(bound.common).catch(() => undefined);
+    const state = await branchState(bound.common, bound.name, base);
+    const cwd = session.summary.claudeCode?.cwd ?? "";
+    const outside = isDirectory(cwd)
+      ? await inspect(cwd).then((c) => c.common !== bound.common, () => true)
+      : true;
+    return {
+      repo: bound.repo,
+      name: bound.name,
+      worktree: state.worktree,
+      tip: state.tip,
+      pushed: state.pushed,
+      ahead: state.ahead,
+      prefix: bound.prefix,
+      defaultBase: base,
+      outside,
+      pr: bound.report?.pr,
+    };
+  }
+
+  // A task the session may act on: itself, or one under it, with a worktree branch.
+  private taskBranch(session: Session, taskId: string): Session {
+    const task =
+      taskId === session.summary.id
+        ? session
+        : this.descendants(session.summary.id).find((s) => s.summary.id === taskId);
+    if (!task?.task?.worktree?.branch || task.task.kind === "dig")
+      throw new Error("That task has no branch under this session.");
+    return task;
+  }
+
+  // The fixes merged into a bound branch, in launch order.
+  private async mergedSources(session: Session, bound: BoundBranch): Promise<PromptSource[]> {
+    const rows = (await this.rowsOf(session)).filter((r) => r.merged && r.common === bound.common);
+    return Promise.all(rows.map((r) => this.sourceOf(this.sessions.get(r.runId)!)));
+  }
+
+  /** The prompt a branch menu item puts in the session's composer. */
+  async branchPrompt(runId: string, action: BranchAction): Promise<string> {
+    const session = this.sessions.get(runId);
+    if (!session?.summary.claudeCode) throw new Error(`No Claude Code session ${runId}.`);
+    if (action.kind === "new-branch") {
+      const checkout = await inspect(action.dir);
+      if (await branchExists(checkout.common, action.name))
+        throw new Error(`${checkout.repo} already has a branch ${action.name}: bind it instead.`);
+      await git(["check-ref-format", "--branch", action.name], checkout.top).catch(() => {
+        throw new Error(`${action.name || "An empty name"} isn't a valid branch name.`);
+      });
+      return newBranchPrompt({ repo: checkout.repo, dir: checkout.top, name: action.name, base: action.base });
+    }
+    if (action.kind === "merge") {
+      if (action.taskIds.length === 0) throw new Error("Pick a task to merge.");
+      const selfMerge = action.taskIds.includes(runId);
+      const target = selfMerge
+        ? this.upstreamOf(session)
+        : this.bindingsOf(session).find((b) => b.common === action.common);
+      if (!target || target.common !== action.common)
+        throw new Error("No branch is bound in that repo to merge into.");
+      const tasks = action.taskIds.map((id) => this.taskBranch(session, id));
+      if (tasks.some((t) => t.task!.worktree!.common !== target.common))
+        throw new Error("Those tasks aren't all in the bound branch's repo.");
+      return mergePrompt(
+        await this.promptTarget(session, target),
+        await Promise.all(tasks.map((t) => this.sourceOf(t))),
+      );
+    }
+    if (action.kind === "split") {
+      const task = this.taskBranch(session, action.taskId);
+      const worktree = task.task!.worktree!;
+      const base = await defaultBase(worktree.common).catch(() => undefined);
+      const onDefault =
+        !!base &&
+        (await git(["--git-dir", worktree.common, "merge-base", "--is-ancestor", worktree.commit, base], worktree.common).then(
+          () => true,
+          () => false,
+        ));
+      const remote = action.remote.trim();
+      await git(["check-ref-format", "--branch", remote], worktree.common).catch(() => {
+        throw new Error(`${remote || "An empty name"} isn't a valid branch name.`);
+      });
+      return splitPrompt(await this.sourceOf(task), {
+        remote,
+        ticket: action.ticket,
+        defaultBase: base,
+        onDefault,
+      });
+    }
+    // Sync, tests, push and PRs: on a bound branch, a task's own, or an inherited one.
+    const inherited = action.common
+      ? this.inheritedOf(session).find((b) => b.common === action.common)
+      : undefined;
+    const bound = action.common
+      ? (this.bindingsOf(session).find((b) => b.common === action.common) ?? inherited)
+      : this.bindingsOf(session).find((b) => b.implicit);
+    if (!bound) throw new Error("This session has no branch in that repo.");
+    // Whose tasks the branch holds: the ancestor's, when inherited.
+    const owner = (bound === inherited && this.sessions.get(inherited.owner)) || session;
+    const target = await this.promptTarget(session, bound);
+    const own = !!bound.implicit;
+    const fixes = async () => (own ? [await this.sourceOf(owner)] : await this.mergedSources(owner, bound));
+    switch (action.kind) {
+      case "sync": {
+        if (!own) return syncPrompt(target);
+        const worktree = owner.task!.worktree!;
+        const up = this.upstreamOf(owner);
+        const onto = up && worktree.base === up.name ? up.name : target.defaultBase;
+        return syncPrompt({ ...target, defaultBase: onto }, { base: worktree.commit });
+      }
+      case "test": {
+        const sources = await fixes();
+        if (sources.length === 0) throw new Error("Nothing is merged into this branch yet.");
+        return testPrompt(target, sources);
+      }
+      case "push":
+        return pushPrompt(target);
+      case "open-pr":
+        return openPrPrompt(target, await fixes());
+      case "update-pr":
+        return updatePrPrompt(target, await fixes());
+      case "comments":
+        return commentsPrompt(target);
+    }
+  }
+
+  /** ui_report_branch: what the agent did to a branch of its own, its tasks' or its upstream. */
+  async reportBranch(caller: Caller, args: Record<string, unknown>): Promise<string> {
+    const session = this.sessionOf(caller);
+    if (!session) throw new Error("Only a session Agent Desktop shows can report on a branch.");
+    const name = typeof args.branch === "string" ? args.branch.trim() : "";
+    if (!name) throw new Error("branch is required: the local branch you worked on.");
+    const remote = typeof args.remote === "string" && args.remote.trim() ? args.remote.trim() : undefined;
+    const raw = (args.pr ?? undefined) as { url?: unknown; number?: unknown } | undefined;
+    if (raw !== undefined && (typeof raw?.url !== "string" || !/^https?:\/\//.test(raw.url)))
+      throw new Error("pr needs a url starting with https://.");
+    const pr = raw && {
+      url: raw.url as string,
+      ...(typeof raw.number === "number" && { number: raw.number }),
+    };
+    const base = typeof args.base === "string" && args.base.trim() ? args.base.trim() : undefined;
+    const report = (previous?: BranchReport): BranchReport | undefined =>
+      remote || pr
+        ? { ...previous, ...(remote && { remote }), ...(pr && { pr }), at: Date.now() }
+        : previous;
+    const done: string[] = [];
+
+    // A branch the session, or one above it, bound.
+    const inherited = this.inheritedOf(session);
+    const above = [this.upstreamOf(session)?.owner, ...inherited.filter((b) => !b.implicit).map((b) => b.owner)];
+    const owners = [session, ...[...new Set(above)].flatMap((id) => (id ? [this.sessions.get(id)!] : []))];
+    for (const owner of owners) {
+      const list = owner.summary.claudeCode?.branches ?? [];
+      const bound = list.find((b) => b.name === name);
+      if (!bound) continue;
+      const exists = await branchExists(bound.common, name);
+      this.setClaudeCode(owner, {
+        branches: list.map((b) =>
+          b === bound
+            ? { ...b, report: report(b.report), ...(exists && { creating: undefined }) }
+            : b,
+        ),
+      });
+      this.update(owner, { changed: [] }, true);
+      done.push(`the bound branch ${name}`);
+      break;
+    }
+
+    // A task's branch: the session's own, one under it, or an inherited one.
+    const aboveTasks = inherited.filter((b) => b.implicit).map((b) => this.sessions.get(b.owner)!);
+    const task = [session, ...this.descendants(session.summary.id), ...aboveTasks].find(
+      (s) => s.task?.worktree?.branch === name && s.task.kind !== "dig",
+    );
+    if (task) {
+      const worktree = task.task!.worktree!;
+      let commit = worktree.commit;
+      if (base) {
+        const resolved = await git(["rev-parse", "--verify", "--quiet", `${base}^{commit}`], worktree.path ?? worktree.common).catch(() => "");
+        if (!resolved.trim()) throw new Error(`base ${base} isn't a commit in ${worktree.repo}.`);
+        commit = resolved.trim();
+      }
+      this.setTask(task, { worktree: { ...worktree, commit }, report: report(task.task!.report) });
+      this.update(task, { changed: [] }, true);
+      if (base) void this.refreshChanges(task);
+      done.push(`the task branch ${name}`);
+    }
+
+    if (done.length === 0)
+      throw new Error(`${name} isn't bound to this session, and isn't the branch of a task under it.`);
+    return `Recorded for ${done.join(" and ")}. Agent Desktop shows it now.`;
+  }
+
   /**
    * Removes a session, with its tasks unless `tasks` is false; those then stay at the root.
    * Deletes the worktrees named, once their processes exit. Returns the removed ids.
@@ -1294,12 +1946,16 @@ export class ClaudeCodeSessions {
       {
         title: parent.summary.title,
         cwd: parent.summary.claudeCode?.cwd,
-        artifact: artifact
-          ? { id: artifact.id, title: artifact.title, format: artifact.format, content: artifact.content }
-          : "The source artifact is gone.",
-        action: action
-          ? { ...action, prompt: this.promptOf(parent, artifact!, action).text }
-          : "Its action is gone",
+        ...(task.kind === "spinoff"
+          ? { sentFrom: "The user sent your prompt from this session's message box; there is no artifact or action." }
+          : {
+              artifact: artifact
+                ? { id: artifact.id, title: artifact.title, format: artifact.format, content: artifact.content }
+                : "The source artifact is gone.",
+              action: action
+                ? { ...action, prompt: this.promptOf(parent, artifact!, action).text }
+                : "Its action is gone",
+            }),
         ...(conversation && { conversation: conversationText(messages, CONVERSATION_CHARS) }),
       },
       null,
@@ -1323,6 +1979,7 @@ export class ClaudeCodeSessions {
         return {
           id: t.summary.id,
           title: t.summary.title,
+          ...(task.kind === "spinoff" && { sentFromMessageBox: true }),
           artifact: task.artifactId,
           action: task.actionId,
           status: t.summary.status,
@@ -1585,6 +2242,14 @@ export class ClaudeCodeSessions {
     const root = task?.worktree?.path;
     const acceptEdits = !!root && !!found.acceptEdits;
     const dig = task?.kind === "dig";
+    const own = dig
+      ? task.reads
+      : acceptEdits && path.resolve(cwd) !== path.resolve(root) ? root : undefined;
+    const bound = dig ? [] : await this.boundWorktrees(session);
+    const addDirs = [...new Set([own, ...bound])].filter(
+      (dir): dir is string => !!dir && path.resolve(dir) !== path.resolve(cwd),
+    );
+    if (alive && !alive()) return;
     const turn = spawn(
       found.path,
       turnArgs({
@@ -1594,9 +2259,7 @@ export class ClaudeCodeSessions {
         resumeAt,
         port,
         acceptEdits,
-        addDir: dig
-          ? task.reads
-          : acceptEdits && path.resolve(cwd) !== path.resolve(root) ? root : undefined,
+        addDirs,
         disallowedTools: dig ? DIG_DISALLOWED : undefined,
       }),
       {
@@ -1609,13 +2272,22 @@ export class ClaudeCodeSessions {
     let error: string | undefined;
     let stderr = "";
     createInterface({ input: turn.stdout }).on("line", (line) => {
-      let event: { type?: string; subtype?: string; is_error?: boolean; result?: unknown };
+      let event: {
+        type?: string;
+        subtype?: string;
+        is_error?: boolean;
+        result?: unknown;
+        tools?: unknown;
+      };
       try {
         event = JSON.parse(line);
       } catch {
         return;
       }
-      if (event.type === "system" && event.subtype === "init") this.locate(session);
+      if (event.type === "system" && event.subtype === "init") {
+        this.locate(session);
+        this.noteTools(session, event.tools);
+      }
       // A background task's report starts a turn nobody wrote.
       if ((event.type === "assistant" || event.type === "user") && !session.busy) {
         clearTimeout(session.idleTimer);

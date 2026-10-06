@@ -41,6 +41,12 @@ const desktop: DesktopApi = {
       ipcRenderer.invoke("claudeCode:preview", parentRunId, actions),
     launch: (parentRunId, requests) =>
       ipcRenderer.invoke("claudeCode:launch", parentRunId, requests),
+    writeContext: (parentRunId, prompt) =>
+      ipcRenderer.invoke("claudeCode:writeContext", parentRunId, prompt),
+    cancelContext: (parentRunId) =>
+      ipcRenderer.invoke("claudeCode:cancelContext", parentRunId),
+    spinoff: (parentRunId, request) =>
+      ipcRenderer.invoke("claudeCode:spinoff", parentRunId, request),
     dig: (parentRunId, artifactId, actionId) =>
       ipcRenderer.invoke("claudeCode:dig", parentRunId, artifactId, actionId),
     decide: (parentRunId, suggestionId, status) =>
@@ -56,6 +62,14 @@ const desktop: DesktopApi = {
     fileDiff: (runId, path) =>
       ipcRenderer.invoke("claudeCode:fileDiff", runId, path),
     reveal: (path) => ipcRenderer.invoke("claudeCode:reveal", path),
+    branchView: (runId) => ipcRenderer.invoke("claudeCode:branchView", runId),
+    localBranches: (common) => ipcRenderer.invoke("claudeCode:localBranches", common),
+    bindBranch: (runId, binding) =>
+      ipcRenderer.invoke("claudeCode:bindBranch", runId, binding),
+    unbindBranch: (runId, common) =>
+      ipcRenderer.invoke("claudeCode:unbindBranch", runId, common),
+    branchPrompt: (runId, action) =>
+      ipcRenderer.invoke("claudeCode:branchPrompt", runId, action),
   },
   plugins: {
     list: () => ipcRenderer.invoke("plugins:list"),

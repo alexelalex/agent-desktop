@@ -16,7 +16,7 @@ import { ipcError } from '@/components/RetryParts'
 import { SuggestionList, useDecide } from '@/components/Suggestions'
 import { Spinner } from '@/components/ui/spinner'
 import { resolvePrompt, type ArtifactAction, type ClaudeCodeArtifact } from '@/lib/claude-code'
-import type { RunSummary, TaskPreview } from '@/lib/desktop'
+import type { BoundBranch, RunSummary, TaskPreview } from '@/lib/desktop'
 import { effectivePrompt, suggestionsOf, waiting } from '@/lib/dig'
 import { useShell } from '@/lib/plugins'
 import { actionDigs, isActive, plural } from '@/lib/tasks'
@@ -30,6 +30,8 @@ interface Row {
   prompt?: string
   open: boolean
   error?: string
+  /** Starts from the action's own base instead of the parent's bound branch. */
+  ownBase?: boolean
 }
 
 const basename = (dir: string) => dir.replace(/\/+$/, '').split('/').at(-1) ?? dir
@@ -39,6 +41,8 @@ export function TaskLaunchDialog(props: {
   parentRunId: string
   /** The parent, which holds the digs' suggestions. */
   run?: RunSummary
+  /** The parent's bound branches: a task in one's repo starts from it unless the row says otherwise. */
+  bound?: BoundBranch[]
   /** Its tasks and digs. */
   tasks: RunSummary[]
   onDig: (actionId: string) => void
@@ -66,6 +70,10 @@ export function TaskLaunchDialog(props: {
       suggestionsOf(props.run, artifact.id, action.id),
     )
   const textOf = (row: Row) => row.prompt ?? promptOf(row.action).text
+  const boundOf = (row: Row) => {
+    const common = previews.get(row.action.id)?.common
+    return common ? props.bound?.find(b => b.common === common && !b.creating) : undefined
+  }
   const [previews, setPreviews] = useState<Map<string, TaskPreview>>(new Map())
   const [launching, setLaunching] = useState(false)
   const [launchedCount, setLaunchedCount] = useState<{ done: number; of: number }>()
@@ -116,6 +124,7 @@ export function TaskLaunchDialog(props: {
           actionId: r.action.id,
           title: r.title,
           text: textOf(r),
+          ...(boundOf(r) && !r.ownBase && { base: boundOf(r)!.name }),
         })),
       )
       const first = results.find(r => r.runId)?.actionId
@@ -168,6 +177,7 @@ export function TaskLaunchDialog(props: {
             const shared = preview?.top
               ? (sharing.get(preview.top) ?? 0) + (preview.sharedRunning ?? 0)
               : 0
+            const bound = boundOf(row)
             return (
               <li key={row.action.id} className="flex flex-col gap-2 rounded-lg border p-3">
                 <div className="flex items-center gap-2">
@@ -195,9 +205,25 @@ export function TaskLaunchDialog(props: {
                       <p className="flex flex-wrap items-center gap-1">
                         <GitBranchIcon className="size-3.5" />
                         New worktree of <code className="font-mono">{preview.repo}</code> from{' '}
-                        <code className="font-mono">{preview.base}</code> @{' '}
-                        <code className="font-mono">{preview.commit?.slice(0, 7)}</code>, branch{' '}
-                        <code className="font-mono">{preview.branch}</code>
+                        {bound ? (
+                          <select
+                            aria-label="Start from"
+                            className="rounded border bg-background px-1 font-mono"
+                            value={row.ownBase ? 'own' : 'bound'}
+                            onChange={e => update(index, { ownBase: e.target.value === 'own' })}
+                          >
+                            <option value="bound">⎇ {bound.name} (bound)</option>
+                            <option value="own">
+                              {preview.base} @ {preview.commit?.slice(0, 7)}
+                            </option>
+                          </select>
+                        ) : (
+                          <>
+                            <code className="font-mono">{preview.base}</code> @{' '}
+                            <code className="font-mono">{preview.commit?.slice(0, 7)}</code>
+                          </>
+                        )}
+                        , branch <code className="font-mono">{preview.branch}</code>
                       </p>
                       <p>
                         Ignored files, such as dependencies and .env, aren't in a new worktree,

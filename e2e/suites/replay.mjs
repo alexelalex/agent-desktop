@@ -34,7 +34,7 @@ try {
   await ask(page, 'List the open detections on beta.')
   check('a single-tenant read runs on beta only', tools(mark).length > 0 && tools(mark).every(e => e.origin === 2035), JSON.stringify(tools(mark).map(e => e.origin)))
 
-  await page.getByRole('button', { name: 'New session' }).click()
+  await page.getByRole('button', { name: 'New session', exact: true }).click()
   mark = log().length
   await page.getByRole('textbox').fill('Set detection det-201 on beta to closed.')
   await page.getByRole('textbox').press('Enter')
@@ -45,7 +45,7 @@ try {
   const writes = tools(mark).filter(e => /setStatus/.test(e.name))
   check('the approved write runs once, on beta', writes.length === 1 && writes[0].origin === 2035, JSON.stringify(writes.map(e => e.origin)))
 
-  await page.getByRole('button', { name: 'New session' }).click()
+  await page.getByRole('button', { name: 'New session', exact: true }).click()
   mark = log().length
   await ask(page, '/each @all Count the open detections.')
   const origins = new Set(tools(mark).map(e => e.origin))

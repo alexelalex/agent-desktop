@@ -87,6 +87,10 @@ export interface RunSummary {
     task?: TaskLink;
     /** What its tasks' digs suggested for its actions' prompts. */
     suggestions?: PromptSuggestion[];
+    /** Branches the user bound to it, one per repo. */
+    branches?: BoundBranch[];
+    /** Its Claude Code has a Jira tool, so a split can file a ticket. */
+    tickets?: boolean;
   };
   toolCalls: number;
   /** What the run published, in the order it was first published. */
@@ -97,16 +101,20 @@ export interface RunSummary {
 
 /** A task's link back to the action it was launched from, and what it did. */
 export interface TaskLink {
-  /** A dig: a read-only session that looks into an action and suggests prompt changes. */
-  kind?: "dig";
+  /**
+   * A dig: a read-only session that looks into an action and suggests prompt changes.
+   * A spin-off: a prompt sent from the parent's message box to a session of its own.
+   */
+  kind?: "dig" | "spinoff";
   /** A dig replaced by a newer one, or whose suggestions were all settled: folded away. */
   archived?: boolean;
   /** The direct parent; not `parentRunId`, which chains triggered runs. */
   parentRunId: string;
   /** Its parent was removed and it was kept: it stays at the root. */
   parentRemoved?: boolean;
-  artifactId: string;
-  actionId: string;
+  /** Unset for a spin-off. */
+  artifactId?: string;
+  actionId?: string;
   /** The parent's depth + 1; a top-level session is 0. */
   depth: 1 | 2;
   launchedAt: number;
@@ -139,7 +147,109 @@ export interface TaskLink {
   fork?: { sessionId: string; at?: string };
   /** A dig reads this folder too: the action's, when it isn't the session's. */
   reads?: string;
+  /** What the agent reported about its branch with ui_report_branch. */
+  report?: BranchReport;
+  /** A spin-off's context from the parent's conversation, as the user sent it. */
+  context?: string;
 }
+
+/** A branch a session owns in one repo; its tasks merge up into it. */
+export interface BoundBranch {
+  /** The repo's git common dir, which keys the binding. */
+  common: string;
+  /** The repo's folder name. */
+  repo: string;
+  name: string;
+  /** Goes in front of each merged commit's subject, e.g. "DEV-22044". */
+  prefix?: string;
+  /** Bound from New branch…: the agent was asked to create it from `base`. */
+  creating?: { base: string };
+  boundAt: number;
+  report?: BranchReport;
+}
+
+/** What an agent reported with ui_report_branch. */
+export interface BranchReport {
+  /** Pushed as this remote branch, when it isn't the local name. */
+  remote?: string;
+  pr?: { url: string; number?: number };
+  at: number;
+}
+
+/** A branch as git has it now. */
+export interface BranchState {
+  exists: boolean;
+  /** The worktree it's checked out in. */
+  worktree?: string;
+  dirty?: boolean;
+  /** An operation left in progress in its worktree, e.g. "a cherry-pick". */
+  inProgress?: string;
+  tip?: string;
+  /** On its remote, by upstream or by `origin/<name>`. */
+  pushed: boolean;
+  /** Commits not on its remote. */
+  ahead?: number;
+  /** Commits on the default base it doesn't have. */
+  behind?: number;
+}
+
+/** A task branch under a session, as its Merge menu lists it. */
+export interface BranchRow {
+  runId: string;
+  title: string;
+  artifactId: string;
+  actionId: string;
+  depth: number;
+  repo: string;
+  common: string;
+  branch: string;
+  status: RunStatus;
+  /** Its worktree has uncommitted changes. */
+  dirty: boolean;
+  commits: number;
+  merged: boolean;
+  /** Can be merged now. */
+  ready: boolean;
+  /** Why it can't, when it can't. */
+  reason?: string;
+  report?: BranchReport;
+}
+
+/** A session's branches: what its branch menus show. */
+export interface BranchView {
+  /** Its bound branches; a task's own worktree branch is listed, `implicit`. */
+  bound: (BoundBranch & { state: BranchState; implicit?: boolean })[];
+  /** A task's upstream: the nearest ancestor's bound branch in its repo. */
+  upstream?: BoundBranch & { state: BranchState; owner: string };
+  /** A task's own branch, against its upstream. */
+  self?: BranchRow;
+  /** Without a branch of its own, it acts on its nearest ancestor's, repo by repo. */
+  inherited: (BoundBranch & { state: BranchState; implicit?: boolean; owner: string; ownerTitle: string })[];
+  /** The task branches under it, any depth, in launch order. */
+  rows: BranchRow[];
+  /** Repos a binding can be in: its folder's and its tasks'. */
+  repos: { common: string; repo: string; dir: string }[];
+  /** `origin/HEAD`'s target, or the first of origin/main, origin/master, main, master; by repo. */
+  defaultBases: Record<string, string>;
+}
+
+/** A local branch, for the Bind branch picker. */
+export interface LocalBranch {
+  name: string;
+  worktree?: string;
+}
+
+/** What a branch menu item asks the agent to do. */
+export type BranchAction =
+  /** Into this session's branch in `common`, or into a task's upstream. */
+  | { kind: "merge"; common: string; taskIds: string[] }
+  | { kind: "split"; taskId: string; remote: string; ticket: boolean }
+  /** On this session's branch in `common`, or a task's own when left out. */
+  | {
+      kind: "sync" | "test" | "push" | "open-pr" | "update-pr" | "comments";
+      common?: string;
+    }
+  | { kind: "new-branch"; dir: string; name: string; base: string };
 
 /** A change a dig suggested to an action's prompt; the user accepts or dismisses it. */
 export interface PromptSuggestion {
@@ -205,6 +315,16 @@ export interface LaunchRequest {
   actionId: string;
   title: string;
   text: string;
+  /** Starts the worktree here instead of at the action's base, e.g. the parent's bound branch. */
+  base?: string;
+}
+
+/** A prompt from a session's message box, for a session of its own under it. */
+export interface SpinoffRequest {
+  title: string;
+  prompt: string;
+  /** From the parent's conversation, put before the prompt. */
+  context?: string;
 }
 
 export interface LaunchResult {
@@ -218,6 +338,8 @@ export interface TaskPreview {
   actionId: string;
   cwd: string;
   repo?: string;
+  /** The repo's git common dir. */
+  common?: string;
   /** The branch the task would get now. */
   branch?: string;
   base?: string;
@@ -462,6 +584,14 @@ export interface DesktopApi {
     ): Promise<TaskPreview[]>;
     /** Creates a queued task per request, in order. */
     launch(parentRunId: string, requests: LaunchRequest[]): Promise<LaunchResult[]>;
+    /**
+     * What the session's conversation says that bears on `prompt`, for a spin-off; empty when
+     * nothing does. A newer call for the same session cancels this one.
+     */
+    writeContext(parentRunId: string, prompt: string): Promise<string>;
+    cancelContext(parentRunId: string): Promise<void>;
+    /** Starts the prompt as a session under this one, past the task cap; resolves to its run. */
+    spinoff(parentRunId: string, request: SpinoffRequest): Promise<string>;
     /** Starts a dig into an action; resolves to its run, or the one already digging into the same prompt. */
     dig(parentRunId: string, artifactId: string, actionId: string): Promise<string>;
     /** Accepts or dismisses a dig's suggestion, or takes that back with "pending". */
@@ -485,6 +615,17 @@ export interface DesktopApi {
     /** A file the task changed, before and after; throws when it has no changes now. */
     fileDiff(runId: string, path: string): Promise<FileDiff>;
     reveal(path: string): Promise<void>;
+    /** The session's branches, as git has them now. */
+    branchView(runId: string): Promise<BranchView>;
+    /** A repo's local branches, those in a worktree first. */
+    localBranches(common: string): Promise<LocalBranch[]>;
+    bindBranch(
+      runId: string,
+      binding: { dir: string; name: string; prefix?: string; creating?: { base: string } },
+    ): Promise<void>;
+    unbindBranch(runId: string, common: string): Promise<void>;
+    /** The prompt a branch menu item fills the composer with. */
+    branchPrompt(runId: string, action: BranchAction): Promise<string>;
   };
   plugins: {
     list(): Promise<PluginInfo[]>;

@@ -32,7 +32,7 @@ export async function launchWithClaudeCode({ env = {}, profile, home } = {}) {
 /** Sends the first message of a new session from the composer; resolves to its run id. */
 export async function startSession(page, profile, prompt) {
   const before = new Set(sessions(profile).map(s => s.id))
-  await page.getByRole('button', { name: 'New session' }).click()
+  await page.getByRole('button', { name: 'New session', exact: true }).click()
   const box = page.locator('textarea:enabled').first()
   await box.fill(prompt)
   await box.press('Enter')

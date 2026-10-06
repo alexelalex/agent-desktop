@@ -18,6 +18,7 @@ import {
   READ_CONVERSATION,
   REPLY_KINDS,
   SET_REPLY_NOTES,
+  START_TURN,
   SUGGEST_REPLIES,
   turnKey,
 } from "@/lib/replies";
@@ -29,6 +30,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import { createInterface } from "node:readline";
+import { pluginInfos } from "../plugins";
 import { readJson, writeJson } from "../store";
 import { claudeCodeInfo, cleanEnv, findTranscript, RUN_HEADER } from "./claude-cli";
 
@@ -46,8 +48,9 @@ const SENT_CHARS = 300;
 const REQUEST_MS = 60_000;
 const CLEAR_MS = 15_000;
 const IDLE_MS = 10 * 60_000;
+const RECENT = 12;
 
-const PROMPT = `You suggest the next message a user is likely to send to an AI agent in Agent Desktop. Each user message you get is a JSON request about one session whose agent just ended its turn. The agent does the work; the user decides, directs, corrects and asks.
+const PROMPT = `You suggest the next message a user is likely to send to an AI agent in Agent Desktop. Each user message you get is a JSON request about one session: one whose agent just ended its turn, or, with type "start", a new one the user just opened. The agent does the work; the user decides, directs, corrects and asks.
 
 For each request, call ${SUGGEST_REPLIES} once with its request_id, then reply with just: ok
 
@@ -75,6 +78,8 @@ Most likely first, at most ${MAX_REPLIES}. One good reply beats three weak ones.
 kind: "answer" when the reply answers the agent's question or picks an option it offered; "next" to continue the work; "redirect" to push back or change course. label: at most ${MAX_LABEL} characters, the gist phrased as the message itself ("Run lint too"), never a description of it ("Ask about lint"). blank: only for a value the user may want to change, such as a number, a time window or a name ("30 days"); most replies have none.
 
 In Agent Desktop, the user launches tasks with action buttons on an agent's artifacts; a task runs in its own session, often in a git worktree, and can't launch tasks itself. When session.task is true, keep replies inside that task's own brief: its tests, checks, commit and the caveats it flagged.
+
+A "start" request has no conversation: suggest the first message of a new session instead. Base it on the user's recent sessions, titled by how each opened, and the tenants connected: a check they run again and again, or the follow-up a recent session points to. The new session can't see the others, so each suggestion stands alone and names what it's about. Use kind "next". Never generic ("What can you do?"), and nothing the recent sessions and tenants don't support.
 
 A request's notes are what you learned about how this user replies; follow them. Its feedback says what the user did with your last suggestions: which one they picked, and what they sent when they edited it or wrote their own. When feedback shows a lasting habit the notes miss or get wrong, call ${SET_REPLY_NOTES} with the whole updated list, after ${SUGGEST_REPLIES}.
 
@@ -188,6 +193,7 @@ function suggesterArgs(o: { sessionId: string; model: string; port: number; runI
 
 /** What the suggester reads of the app's runs. */
 export interface SuggesterRuns {
+  list(): RunSummary[];
   find(runId: string): RunSummary | undefined;
   messagesOf(runId: string): UIMessage[] | undefined;
 }
@@ -204,7 +210,7 @@ type Proc = {
   result?: (ok: boolean) => void;
   stderr: string;
 };
-type Turn = { run: RunSummary; messages: UIMessage[]; turnId: string };
+type Turn = { run?: RunSummary; messages: UIMessage[]; turnId: string };
 type Feedback = { run_id: string; shown: string[]; picked: number | null; edited: boolean; sent?: string };
 
 const cleanNotes = (notes: string[]) =>
@@ -287,6 +293,13 @@ export class ReplySuggester {
     const cached = this.cache.get(runId);
     if (cached?.turnId === turnId) return cached;
     const state: ReplyState = { runId, turnId, status: "pending", replies: [] };
+    // One new chat shows at a time: an earlier one's request still queued is dropped.
+    if (turnId === START_TURN)
+      for (const [other, queued] of this.queue)
+        if (queued === START_TURN) {
+          this.queue.delete(other);
+          this.drop(other, START_TURN);
+        }
     this.cache.set(runId, state);
     this.queue.delete(runId);
     this.queue.set(runId, turnId);
@@ -358,6 +371,7 @@ export class ReplySuggester {
   // The turn a run ended last, while it waits on the user and a reply can reach it.
   private turnOf(runId: string): Turn | undefined {
     const run = this.runs.find(runId);
+    if (!run) return this.runs.messagesOf(runId)?.length ? undefined : { messages: [], turnId: START_TURN };
     const cwd = run?.claudeCode?.cwd;
     if (cwd && !existsSync(cwd)) return undefined;
     const messages = run?.status === "completed" ? this.runs.messagesOf(runId) : undefined;
@@ -409,7 +423,7 @@ export class ReplySuggester {
     // Each request stands alone; an earlier one's conversation leaks into replies otherwise.
     const cleared = !proc.used || (await this.send(proc, "/clear", CLEAR_MS));
     proc.used = true;
-    const ok = cleared && (await this.send(proc, JSON.stringify(this.requestOf(inflight.requestId, turn)), REQUEST_MS));
+    const ok = cleared && (await this.send(proc, JSON.stringify(this.requestOf(inflight.requestId, runId, turn)), REQUEST_MS));
     this.inflight = undefined;
     if (ok) this.error = undefined;
     if (!inflight.answered) this.settle(runId, turnId, ok ? "none" : "failed");
@@ -417,23 +431,47 @@ export class ReplySuggester {
     this.changed();
   }
 
-  private requestOf(requestId: string, { run, messages, turnId }: Turn) {
-    this.requested.add(run.id);
+  private requestOf(requestId: string, runId: string, { run, messages, turnId }: Turn) {
     const feedback = this.feedback.splice(0);
+    const common = {
+      request_id: requestId,
+      run_id: runId,
+      turn_id: turnId,
+      notes: this.setup().notes,
+      ...(feedback.length > 0 && { feedback }),
+    };
+    if (!run) return { type: "start", ...common, recent: this.recent(), tenants: this.tenants() };
+    this.requested.add(run.id);
     return {
       type: "suggest",
-      request_id: requestId,
-      run_id: run.id,
-      turn_id: turnId,
+      ...common,
       session: {
         title: run.title,
         engine: run.claudeCode ? "claude-code" : "plugin",
         task: !!run.claudeCode?.task,
       },
-      notes: this.setup().notes,
       conversation: conversationText(messages, EXCERPT),
-      ...(feedback.length > 0 && { feedback }),
     };
+  }
+
+  // Titles are how each session opened; tasks and digs opened from an artifact instead.
+  private recent() {
+    return this.runs
+      .list()
+      .filter((r) => !r.claudeCode?.task && !r.readOnly)
+      .slice(0, RECENT)
+      .map((r) => ({
+        title: r.title,
+        engine: r.claudeCode ? "claude-code" : "plugin",
+        ...(r.claudeCode && { folder: path.basename(r.claudeCode.cwd) }),
+        updated: new Date(r.updatedAt).toISOString().slice(0, 10),
+      }));
+  }
+
+  private tenants() {
+    return pluginInfos()
+      .filter((p) => !p.orchestrator && p.status === "ready")
+      .map((p) => p.label);
   }
 
   private async start(): Promise<Proc> {

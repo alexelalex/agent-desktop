@@ -30,7 +30,7 @@ check('tokens sealed', secrets.some(f => f.endsWith('.bin')) && !secrets.some(f 
 const first = runs[0]
 
 // 2. A run keeps going when the view switches away.
-await page.getByRole('button', { name: 'New session' }).click()
+await page.getByRole('button', { name: 'New session', exact: true }).click()
 await send(page, 'List my open detections, then for each one explain in two sentences why it matters.')
 await page.waitForTimeout(1500)
 await page.getByRole('button', { name: first.title }).click()
@@ -49,7 +49,7 @@ await page.getByText(/Thought for/).first().waitFor({ timeout: 10_000 })
 check('finished run shows its answer', (await page.getByText('GET /detections', { exact: true }).count()) > 0)
 
 // 3. Approval continues in the main process.
-await page.getByRole('button', { name: 'New session' }).click()
+await page.getByRole('button', { name: 'New session', exact: true }).click()
 await send(page, 'Resolve detection det-101 and add a comment saying it was a planned change.')
 await page.getByRole('button', { name: 'Approve' }).first().waitFor({ timeout: 240_000 })
 check('awaiting approval indexed', index(profile).some(r => r.status === 'awaiting_approval'))
@@ -61,7 +61,7 @@ const writes = calls().slice(before).filter(c => c.route === 'tool' && /detectio
 check('approved write ran', writes.length > 0, writes.map(w => w.name).join(', '))
 
 // 4. Stop mid-stream.
-await page.getByRole('button', { name: 'New session' }).click()
+await page.getByRole('button', { name: 'New session', exact: true }).click()
 await send(page, 'Investigate every open detection one by one with separate tool calls.')
 await page.waitForTimeout(4000)
 await page.getByRole('button', { name: 'Stop', exact: true }).click()

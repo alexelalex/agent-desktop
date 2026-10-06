@@ -156,9 +156,10 @@ const pluginClient = () => (plugin ??= connect(server.url, pluginHeaders()))
 
 let messageCount = 0
 const said = []
+const usage = () => ({ input_tokens: 3, cache_read_input_tokens: 1200 * messageCount, output_tokens: 40 })
 function toolUse(name, input) {
   const id = `toolu_${randomUUID().replace(/-/g, '').slice(0, 24)}`
-  write({ type: 'assistant', message: { id: `msg_${++messageCount}`, role: 'assistant', content: [{ type: 'tool_use', id, name, input }] } })
+  write({ type: 'assistant', message: { id: `msg_${++messageCount}`, role: 'assistant', content: [{ type: 'tool_use', id, name, input }], usage: usage() } })
   return id
 }
 function toolResult(id, text, isError = false) {
@@ -181,7 +182,7 @@ const own = tool => /^(mcp__desktop__|ui_|tenant__)/.test(tool)
 const steps = {
   async say(text) {
     said.push(text)
-    write({ type: 'assistant', message: { id: `msg_${++messageCount}`, role: 'assistant', content: [{ type: 'text', text }] } })
+    write({ type: 'assistant', message: { id: `msg_${++messageCount}`, role: 'assistant', content: [{ type: 'text', text }], usage: usage() } })
   },
   async render(args) {
     return steps.call('ui_render_artifact', args)
@@ -284,7 +285,9 @@ async function suggest(content) {
     try {
       const request = JSON.parse(content)
       log({ event: 'suggester-request', request })
-      const said = request.conversation.slice(request.conversation.lastIndexOf('\n\nAssistant: '))
+      const said = request.type === 'start'
+        ? ''
+        : request.conversation.slice(request.conversation.lastIndexOf('\n\nAssistant: '))
       const at = said.lastIndexOf('[fake-suggest:')
       const plan = at < 0
         ? [['suggest', { replies: [{ label: 'Go on', text: 'go on', kind: 'next' }] }]]
@@ -309,15 +312,32 @@ async function suggest(content) {
     : { type: 'result', subtype: 'success', is_error: false, result: 'ok', session_id: sessionId })
 }
 
+// A spin-off's context writer: the prompt in its request may hold `[fake-context:<json>]` with
+// text, wait (ms) and fail; without one it finds nothing that bears on the prompt.
+const contextWriter = (flag('--system-prompt') ?? '').startsWith('You write context briefs')
+async function writeContext(content) {
+  log({ event: 'context-request', argv, content })
+  const prompt = content.slice(content.lastIndexOf('<prompt>'))
+  const at = prompt.indexOf('[fake-context:')
+  const plan = at < 0 ? {} : jsonAt(prompt, at + '[fake-context:'.length).value
+  if (plan.wait) await new Promise(resolve => setTimeout(resolve, plan.wait))
+  out(plan.fail
+    ? { type: 'result', subtype: 'error_during_execution', is_error: true, result: plan.fail, session_id: sessionId }
+    : { type: 'result', subtype: 'success', is_error: false, result: plan.text ?? 'NONE', session_id: sessionId })
+}
+
 let first = true
 async function turn(content) {
   log({ event: 'input', sessionId, content })
   if (suggester) return suggest(content)
+  if (contextWriter) return writeContext(content)
   // Lets a test see the window before the transcript has the prompt.
   if (first && process.env.FAKE_PROMPT_DELAY_MS) await new Promise(r => setTimeout(r, Number(process.env.FAKE_PROMPT_DELAY_MS)))
   const prompt = write({ type: 'user', message: { role: 'user', content } })
   appendFileSync(file, `${JSON.stringify({ type: 'file-history-snapshot', messageId: prompt, snapshot: {}, isSnapshotUpdate: false })}\n`)
-  if (first) out({ type: 'system', subtype: 'init', session_id: sessionId, cwd, permissionMode: mode })
+  // FAKE_TOOLS: extra tool names the init event lists, e.g. a Jira tool.
+  const tools = (process.env.FAKE_TOOLS ?? '').split(',').filter(Boolean)
+  if (first) out({ type: 'system', subtype: 'init', session_id: sessionId, cwd, permissionMode: mode, tools: ['Bash', 'Edit', ...tools] })
   first = false
   await hook('UserPromptSubmit')
   said.length = 0

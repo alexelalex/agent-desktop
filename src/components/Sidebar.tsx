@@ -1,4 +1,5 @@
 import { ArtifactIcon } from "@/components/ArtifactView";
+import { SidebarBranchMenu } from "@/components/BranchMenu";
 import {
   baseName,
   DiffStat,
@@ -31,6 +32,7 @@ import {
   isActive,
   isDig,
   isRoot,
+  isSpinoff,
   plural,
   taskOf,
   taskTree,
@@ -63,10 +65,19 @@ export type View =
       file?: string;
       /** The action the panel scrolls to; `at` tells a second click from the first. */
       bookmark?: { actionId: string; at: number };
+      /** What its sidebar ⎇ menu asked for: a prompt for the composer, or why it couldn't write one. */
+      branch?: BranchHandoff;
     }
   | { kind: "agent"; agentId: string }
   /** Nothing open: on a small window, the list alone. */
   | { kind: "sessions" };
+
+/** A sidebar ⎇ menu's result for its session's chat; `at` tells repeats apart. */
+export interface BranchHandoff {
+  prompt?: { text: string; ask: string; afterSend?: { match: string; run: () => void } };
+  error?: string;
+  at: number;
+}
 
 const EARLIER = "earlier";
 
@@ -99,7 +110,8 @@ function ClaudeCodeIcon(props: { run: RunSummary }) {
 function claudeCodeTitle(run: RunSummary) {
   const where = run.claudeCode?.cwd ? ` in ${run.claudeCode.cwd}` : "";
   const state = run.claudeCode?.live ? "attached" : "ended";
-  return `Claude Code${where} · ${state} · ${runStatusLabel(run.status)}`;
+  const bound = (run.claudeCode?.branches ?? []).map((b) => ` · ⎇ ${b.name}`).join("");
+  return `Claude Code${where} · ${state} · ${runStatusLabel(run.status)}${bound}`;
 }
 
 type Depth = 0 | 1 | 2 | 3 | 4 | 5 | 6;
@@ -224,7 +236,7 @@ export function Sidebar(props: {
   className?: string;
 }) {
   const { agents, runs, earlier, view, onSelect } = props;
-  const { blocked } = useShell();
+  const { blocked, claudeCode: claudeCodeSetup } = useShell();
   const byId = useMemo(() => new Map(runs.map((r) => [r.id, r])), [runs]);
   const children = useMemo(() => taskTree(runs), [runs]);
   const listedIds = useMemo(() => new Set(runs.map((r) => r.id)), [runs]);
@@ -269,7 +281,7 @@ export function Sidebar(props: {
     ...chain.map((r) => r.id),
     ...[activeRun, ...chain].flatMap((r) => {
       const task = r && taskOf(r);
-      if (!task) return [];
+      if (!task?.actionId) return [];
       const artifact = `${task.parentRunId}/${task.artifactId}`;
       return [artifact, `${artifact}/${task.actionId}`];
     }),
@@ -293,6 +305,8 @@ export function Sidebar(props: {
   const taskTitle = (run: RunSummary) => {
     const task = taskOf(run)!;
     const parent = byId.get(task.parentRunId);
+    if (isSpinoff(run))
+      return `Sent from ${parent?.title ?? "its session"}${task.context ? " with context" : ""} · ${runStatusLabel(run.status)}`;
     const artifact = parent?.artifacts?.find((a) => a.id === task.artifactId);
     const branch = task.worktree?.branch ? ` · ${task.worktree.branch}` : "";
     return `From ${artifact?.title ?? task.artifactId} · ${task.actionId}${branch} · ${runStatusLabel(run.status)}`;
@@ -485,6 +499,29 @@ export function Sidebar(props: {
             >
               <BookmarkPlusIcon />
             </Action>
+          )}
+          {run.claudeCode && !run.readOnly && !isDig(run) && (
+            <SidebarBranchMenu
+              run={run}
+              below={below}
+              canRun={!!claudeCodeSetup?.found}
+              onPrompt={(prompt) =>
+                onSelect({
+                  kind: "run",
+                  runId: run.id,
+                  ...(here && view.artifactId && { artifactId: view.artifactId }),
+                  branch: { prompt, at: Date.now() },
+                })
+              }
+              onError={(error) =>
+                onSelect({
+                  kind: "run",
+                  runId: run.id,
+                  ...(here && view.artifactId && { artifactId: view.artifactId }),
+                  branch: { error, at: Date.now() },
+                })
+              }
+            />
           )}
           <Action
             label={run.claudeCode ? "Remove from list" : "Delete run"}

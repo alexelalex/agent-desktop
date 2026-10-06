@@ -21,6 +21,7 @@ import { statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { approvalHub } from "./approval-hub";
+import { REPORT_TOOL } from "./branch-prompts";
 import { TASK_APPROVAL_MS } from "./claude-cli";
 import { DIG_READ_ONLY, readOnlyGit } from "./dig";
 import { inspect } from "./git";
@@ -37,7 +38,7 @@ export const RESTORE_FILES = "ui_restore_files";
 export const READ_PARENT = "ui_read_parent";
 export const LIST_TASKS = "ui_list_tasks";
 // Tools that sessions the app runs use without a prompt; replay ignores them.
-const NO_PROMPT = new Set([READ_PARENT, LIST_TASKS, SUGGEST_TOOL]);
+const NO_PROMPT = new Set([READ_PARENT, LIST_TASKS, SUGGEST_TOOL, REPORT_TOOL]);
 export const UNKNOWN_CALLER = "Actions need a session Agent Desktop shows.";
 export const SUB_TASK = "Sub-tasks can't launch tasks.";
 
@@ -47,6 +48,8 @@ export interface TaskReader {
   tasksOf(id?: string): string;
   /** A dig's suggested changes to its action's prompt. */
   suggest(changes: unknown): string;
+  /** What the agent did to a branch it was asked to work on. */
+  reportBranch(args: Record<string, unknown>): Promise<string>;
 }
 
 export interface UiCallContext {
@@ -254,7 +257,7 @@ export const UI_TOOL_DEFINITIONS = [
   {
     name: READ_PARENT,
     description:
-      "In a task: read the session that launched it, its source artifact as currently rendered, and the action. With conversation: true, also the parent's conversation as text (newest 50,000 characters). Call it only if your brief leaves something out.",
+      "In a task: read the session that launched it, its source artifact as currently rendered, and the action; a session sent from the parent's message box has neither. With conversation: true, also the parent's conversation as text (newest 50,000 characters). Call it only if your brief leaves something out.",
     inputSchema: {
       type: "object" as const,
       properties: { conversation: { type: "boolean" } },
@@ -263,7 +266,7 @@ export const UI_TOOL_DEFINITIONS = [
   {
     name: LIST_TASKS,
     description:
-      "This session's tasks, launched from its artifacts' actions: status, branch and worktree, commits ahead, files changed, uncommitted changes, and each one's final answer (8,000 characters; 50,000 with id). Call it when the user asks about tasks; never poll it.",
+      "This session's tasks, launched from its artifacts' actions or sent from its message box: status, branch and worktree, commits ahead, files changed, uncommitted changes, and each one's final answer (8,000 characters; 50,000 with id). Call it when the user asks about tasks; never poll it.",
     inputSchema: {
       type: "object" as const,
       properties: { id: { type: "string", description: "One task's id, for its whole answer" } },
@@ -302,6 +305,35 @@ export const UI_TOOL_DEFINITIONS = [
             },
           },
         },
+      },
+    },
+  },
+  {
+    name: REPORT_TOOL,
+    description:
+      "After working on a branch the user asked you to merge, split, push, sync or open a PR for: report it, so Agent Desktop shows the branch's state. Name the local branch you worked on.",
+    inputSchema: {
+      type: "object" as const,
+      required: ["branch"],
+      properties: {
+        branch: { type: "string", description: "The local branch you worked on." },
+        merged: {
+          type: "array",
+          items: { type: "string" },
+          description: "The task branches you merged into it.",
+        },
+        remote: {
+          type: "string",
+          description: "The remote branch you pushed it as, when that isn't its local name.",
+        },
+        base: { type: "string", description: "After a rebase: the commit you rebased onto." },
+        pr: {
+          type: "object",
+          required: ["url"],
+          properties: { url: { type: "string" }, number: { type: "number" } },
+          description: "The PR you opened for it.",
+        },
+        created: { type: "boolean", description: "You created the branch." },
       },
     },
   },
@@ -683,6 +715,11 @@ export async function handleUiToolCall(
       case SUGGEST_TOOL: {
         if (!context.tasks) throw new Error("Only a dig suggests prompt changes.");
         return { content: [{ type: "text", text: context.tasks.suggest(args.changes) }] };
+      }
+
+      case REPORT_TOOL: {
+        if (!context.tasks) throw new Error("Only a session Agent Desktop shows can report on a branch.");
+        return { content: [{ type: "text", text: await context.tasks.reportBranch(args) }] };
       }
 
       case LIST_TASKS: {

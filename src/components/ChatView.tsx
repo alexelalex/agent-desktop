@@ -18,6 +18,7 @@ import {
 } from '@/components/ai-elements/conversation'
 import { Message, MessageContent } from '@/components/ai-elements/message'
 import { ArtifactsPanel } from '@/components/ArtifactsPanel'
+import { BranchFacts, BranchMenu, useBranchView } from '@/components/BranchMenu'
 import { ClaudeCodeAgents, useClaudeCodeAgents } from '@/components/ClaudeCodeAgents'
 import { Composer } from '@/components/Composer'
 import { useReplies } from '@/components/ReplyRail'
@@ -31,7 +32,9 @@ import { FileDiffPanel } from '@/components/FileDiffPanel'
 import { McpArtifactPanel } from '@/components/McpArtifactPanel'
 import { ResizeHandle } from '@/components/ResizeHandle'
 import { actionKey, type ActionsContextValue } from '@/components/TaskActions'
+import type { BranchHandoff } from '@/components/Sidebar'
 import { TaskLaunchDialog } from '@/components/TaskLaunchDialog'
+import { SpinoffContext, SpinoffDialog } from '@/components/SpinoffDialog'
 import { SuggestionList, SuggestionsDialog, useDecide } from '@/components/Suggestions'
 import {
   atStake,
@@ -48,8 +51,9 @@ import {
   CHANNELS_COMMAND,
   claudeCodeArtifacts,
   claudeCodePlan,
+  sessionUsage,
 } from '@/lib/claude-code'
-import type { RetryPreflight, RunSummary } from '@/lib/desktop'
+import type { BranchRow, RetryPreflight, RunSummary } from '@/lib/desktop'
 import { suggestionsOf } from '@/lib/dig'
 import {
   actionGone,
@@ -70,7 +74,7 @@ import {
   stampsOf,
   touchedPlugins,
 } from '@/lib/routing'
-import { turnKey } from '@/lib/replies'
+import { START_TURN, turnKey } from '@/lib/replies'
 import { chatTitle } from '@/lib/runs'
 import type { SpecOperation } from '@/lib/spec'
 import {
@@ -83,11 +87,6 @@ import { delegations, latestPlan } from '@/lib/todo'
 import { claudeCodeOrchestrates, ShellContext, useShell } from '@/lib/plugins'
 import { useRun } from '@/lib/use-run'
 import { cn } from '@/lib/utils'
-
-const EXAMPLES = [
-  'What are my critical open detections from the last 24 hours, and why?',
-  'Which internet-exposed resources have critical vulnerabilities?',
-]
 
 const PANEL_MIN = 480
 const CHAT_MIN = 440
@@ -128,6 +127,8 @@ export function ChatView(props: {
   onOpenRun?: (runId: string, artifactId?: string, actionId?: string) => void
   /** Set on a small window, where the session list takes the chat's place. */
   onBack?: () => void
+  /** What the session's sidebar ⎇ menu asked for: a prompt to fill, or an error to show. */
+  branch?: BranchHandoff
 }) {
   const {
     chatId,
@@ -161,6 +162,7 @@ export function ChatView(props: {
   const { claudeCode } = props
   const isClaudeCode = claudeCode !== undefined
   const agents = useClaudeCodeAgents(chatId, isClaudeCode)
+  const usage = useMemo(() => (isClaudeCode ? sessionUsage(messages) : undefined), [isClaudeCode, messages])
   // A terminal session takes messages over its channel; any other resumes with `claude -p`.
   const unreachable = claudeCode?.live && claudeCode.channels === false
   const canReply = !isClaudeCode || (claudeCode.live ? !unreachable : !!setup?.found)
@@ -192,6 +194,8 @@ export function ChatView(props: {
     window.desktop.claudeCode.dig(chatId, artifactId, actionId).catch(e => setDigError(ipcError(e)))
   }
   const [selected, setSelected] = useState<Map<string, Set<string>>>(new Map())
+  // The prompt on its way to a new session, while its dialog is open.
+  const [spinningOff, setSpinningOff] = useState<string>()
   const runs = useMemo(() => delegations(messages, busy), [messages, busy])
 
   // Retry and Edit: in sessions the app runs, not in one a terminal has open.
@@ -233,7 +237,7 @@ export function ChatView(props: {
     () => template && { template, values: {} as Record<string, string> },
   )
   // A prompt template fills the input; a plan template waits in the stage.
-  const [draft, setDraft] = useState(() =>
+  const [draft, setDraft] = useState<{ text: string; ask?: string } | undefined>(() =>
     template?.kind === 'prompt' ? { text: template.prompt } : undefined,
   )
   const started = messages.length > 0
@@ -325,6 +329,61 @@ export function ChatView(props: {
     }
   }
 
+  // A task's first message never reached Claude Code: it has no composer until it starts.
+  const notStarted =
+    !!task &&
+    loaded &&
+    !messages.some(m => m.role === 'user' && !(m.metadata as { pending?: boolean } | undefined)?.pending)
+  // The ⎇ menu: its items fill the composer, so they wait while the session can't take a message.
+  const branchesShown = isClaudeCode && !readOnly && task?.kind !== 'dig'
+  const branchVersion = JSON.stringify([
+    props.run?.updatedAt,
+    props.run?.status,
+    claudeCode?.branches,
+    task?.report,
+    task?.worktree?.commit,
+    props.parent?.claudeCode?.branches,
+    (props.tasks ?? []).map(t => [t.id, t.status, t.updatedAt, taskOf(t)?.report]),
+  ])
+  const branches = useBranchView(chatId, branchesShown, branchVersion)
+  const branchBlocked = notStarted
+    ? "This task hasn't sent its first message yet"
+    : !canReply
+      ? unreachable
+        ? "This terminal session doesn't take messages from the app"
+        : 'Set up Claude Code in Options to message this session'
+      : sessionRunning || busy
+        ? 'The session is mid-turn'
+        : undefined
+  const [branchError, setBranchError] = useState<string>()
+  const [branchRequest, setBranchRequest] = useState<{ kind: 'merge' | 'split'; row: BranchRow; at: number }>()
+  // What a New branch… prompt binds once it's sent.
+  const afterSend = useRef<{ match: string; run: () => void }>(undefined)
+  const explicitBound = (branches.view?.bound ?? []).filter(b => !b.implicit)
+  const handoff = props.branch
+  useEffect(() => {
+    if (!handoff) return
+    setBranchError(handoff.error)
+    if (!handoff.prompt) return
+    afterSend.current = handoff.prompt.afterSend
+    setDraft({ text: handoff.prompt.text, ask: handoff.prompt.ask })
+  }, [handoff])
+  const branchMenu = branchesShown && (
+    <BranchMenu
+      runId={chatId}
+      view={branches.view}
+      artifacts={props.run?.artifacts ?? []}
+      blocked={branchBlocked}
+      tickets={!!claudeCode?.tickets}
+      request={branchRequest}
+      onRefresh={branches.refresh}
+      onError={setBranchError}
+      onPrompt={(text, ask, after) => {
+        afterSend.current = after
+        setDraft({ text, ask })
+      }}
+    />
+  )
   const sessionArtifact = sessionArtifacts.find(a => a.id === artifactId)
   const actionsDisabled =
     (task?.depth ?? 0) >= 2
@@ -361,9 +420,31 @@ export function ChatView(props: {
           onDig: actionId => !actionsDisabled && startDig(sessionArtifact.id, actionId),
           onReview: actionId => setReviewing({ artifactId: sessionArtifact.id, actionId }),
           notice: digError,
+          branch:
+            branches.view && explicitBound.length > 0
+              ? {
+                  bound: explicitBound,
+                  rows: new Map(branches.view.rows.map(r => [r.runId, r])),
+                  blocked: branchBlocked,
+                  onMerge: row => setBranchRequest({ kind: 'merge', row, at: Date.now() }),
+                  onSplit: row => setBranchRequest({ kind: 'split', row, at: Date.now() }),
+                }
+              : undefined,
         }
       : undefined
   const launchArtifact = launching && sessionArtifacts.find(a => a.id === launching.artifactId)
+  const newSession =
+    isClaudeCode && started && !readOnly && task?.kind !== 'dig'
+      ? {
+          blocked:
+            (task?.depth ?? 0) >= 2
+              ? "Sub-tasks can't start sessions under them."
+              : !setup?.found
+                ? 'Set up Claude Code in Options to start sessions.'
+                : undefined,
+          open: setSpinningOff,
+        }
+      : undefined
   // A dig's own chat: what it suggested, to accept or dismiss right there.
   const digSuggestions =
     task?.kind === 'dig' && props.parent
@@ -372,11 +453,6 @@ export function ChatView(props: {
   const { error: decideError, decide } = useDecide(props.parent?.id ?? '')
   const reviewDig =
     reviewing && actionDigs(props.tasks ?? [], reviewing.artifactId, reviewing.actionId).at(-1)
-  // A task's first message never reached Claude Code: it has no composer until it starts.
-  const notStarted =
-    !!task &&
-    loaded &&
-    !messages.some(m => m.role === 'user' && !(m.metadata as { pending?: boolean } | undefined)?.pending)
   // Suggested replies, once a turn ended that the user can answer from here.
   const lastMessage = messages.at(-1)
   const turnId = lastMessage?.role === 'assistant' ? turnKey(lastMessage) : undefined
@@ -390,10 +466,13 @@ export function ChatView(props: {
     !readOnly &&
     !notStarted &&
     task?.kind !== 'dig'
-  const replyState = useReplies(chatId, suggestible ? turnId : undefined)
+  // A new chat: what the user may open with.
+  const opening = loaded && messages.length === 0 && !isClaudeCode && !readOnly && !blocked && !stage && !busy
+  const suggestTurn = opening ? START_TURN : suggestible ? turnId : undefined
+  const replyState = useReplies(chatId, suggestTurn)
   const [hiddenTurn, setHiddenTurn] = useState<string>()
   const replies =
-    replyState?.status === 'ready' && hiddenTurn !== turnId ? replyState.replies : undefined
+    replyState?.status === 'ready' && hiddenTurn !== suggestTurn ? replyState.replies : undefined
   const parentTitle = props.parent?.title
   const sourceArtifact = task && props.parent?.artifacts?.find(a => a.id === task.artifactId)
   const worktree = task?.worktree
@@ -442,7 +521,7 @@ export function ChatView(props: {
           <header
             className={cn(
               'flex shrink-0 items-center gap-4 border-b px-4',
-              task ? 'min-h-11 py-1.5' : 'h-11',
+              task || explicitBound.length > 0 ? 'min-h-11 py-1.5' : 'h-11',
             )}
           >
             {props.onBack && (
@@ -467,13 +546,20 @@ export function ChatView(props: {
                   <span className="min-w-0 truncate">{props.run?.title}</span>
                 </h2>
                 <p className="flex min-w-0 flex-wrap items-center gap-x-2 text-xs text-muted-foreground">
-                  {props.parent && !task.parentRemoved && (
-                    <button
-                      className="truncate hover:text-foreground hover:underline"
-                      onClick={() => props.onOpenRun?.(props.parent!.id, task.artifactId)}
-                    >
-                      from {sourceArtifact?.title ?? task.artifactId}
-                    </button>
+                  {task.kind === 'spinoff' ? (
+                    <span className="truncate">
+                      sent from the message box{task.context ? ' · with context' : ''}
+                    </span>
+                  ) : (
+                    props.parent &&
+                    !task.parentRemoved && (
+                      <button
+                        className="truncate hover:text-foreground hover:underline"
+                        onClick={() => props.onOpenRun?.(props.parent!.id, task.artifactId)}
+                      >
+                        from {sourceArtifact?.title ?? task.artifactId}
+                      </button>
+                    )
                   )}
                   {props.parent && !task.parentRemoved && actionGone(task, props.parent) && (
                     <span className="text-amber-600 dark:text-amber-400">Its action is gone</span>
@@ -515,14 +601,59 @@ export function ChatView(props: {
                       >
                         Copy branch
                       </Button>
+                      {branchMenu}
+                      {branches.view?.self?.merged && branches.view.upstream && (
+                        <span className="shrink-0">· merged into {branches.view.upstream.name}</span>
+                      )}
+                      {task.report?.pr && (
+                        <a
+                          href={task.report.pr.url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="shrink-0 hover:text-foreground hover:underline"
+                          title="Reported by the agent"
+                        >
+                          · {task.report.remote ? 'own ' : ''}
+                          {task.report.pr.number ? `PR #${task.report.pr.number}` : 'PR'}
+                        </a>
+                      )}
                     </span>
                   )}
+                  {branches.view &&
+                    explicitBound.map(b => (
+                      <BranchFacts
+                        key={b.common}
+                        bound={b}
+                        state={b.state}
+                        rows={branches.view!.rows}
+                        defaultBase={branches.view!.defaultBases[b.common]}
+                      />
+                    ))}
+                  {!worktree?.branch && branchMenu}
                 </p>
               </div>
             ) : (
-              <h2 className="min-w-0 flex-1 truncate text-sm font-medium">
-                {isClaudeCode ? (props.run?.title ?? chatTitle(messages)) : chatTitle(messages)}
-              </h2>
+              <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+                <h2 className="flex min-w-0 items-center gap-1 text-sm font-medium">
+                  <span className="min-w-0 truncate">
+                    {isClaudeCode ? (props.run?.title ?? chatTitle(messages)) : started && chatTitle(messages)}
+                  </span>
+                  {branchMenu}
+                </h2>
+                {branches.view && explicitBound.length > 0 && (
+                  <p className="flex min-w-0 flex-wrap items-center gap-x-3 text-xs text-muted-foreground">
+                    {explicitBound.map(b => (
+                      <BranchFacts
+                        key={b.common}
+                        bound={b}
+                        state={b.state}
+                        rows={branches.view!.rows}
+                        defaultBase={branches.view!.defaultBases[b.common]}
+                      />
+                    ))}
+                  </p>
+                )}
+              </div>
             )}
             {tenants.length > 0 && (
               <p
@@ -535,39 +666,19 @@ export function ChatView(props: {
           </header>
           <Conversation key={String(loaded)} contextRef={conversation}>
             <ConversationContent className="mx-auto w-full max-w-3xl">
+              {loaded && task?.kind === 'spinoff' && task.context && (
+                <SpinoffContext
+                  context={task.context}
+                  parentTitle={task.parentRemoved ? undefined : parentTitle}
+                />
+              )}
               {!loaded ? null : messages.length === 0 && isClaudeCode ? (
                 <ConversationEmptyState
                   icon={<SquareTerminalIcon />}
                   title="Waiting for Claude Code"
                   description="Prompts, thinking and tool calls show here as the session runs."
                 />
-              ) : messages.length === 0 ? (
-                <ConversationEmptyState>
-                  <div className="space-y-1">
-                    <h3 className="text-sm font-medium">
-                      Ask about your cloud security posture
-                    </h3>
-                    <p className="text-sm text-muted-foreground">
-                      {viaClaudeCode
-                        ? 'Claude Code answers here, using your tenants through the app. Anything it wants to change waits for your approval.'
-                        : 'The assistant queries your tenants through their APIs. Changes wait for your approval.'}
-                    </p>
-                  </div>
-                  <div className="mt-4 flex flex-col gap-2">
-                    {EXAMPLES.map(text => (
-                      <Button
-                        key={text}
-                        variant="outline"
-                        className="h-auto whitespace-normal text-left"
-                        disabled={!!blocked}
-                        onClick={() => sendMessage({ text })}
-                      >
-                        {text}
-                      </Button>
-                    ))}
-                  </div>
-                </ConversationEmptyState>
-              ) : (
+              ) : messages.length === 0 ? null : (
                 messages.map((message, index) => {
                   const meta = message.metadata as
                     | { pending?: boolean; midTurn?: boolean }
@@ -677,6 +788,11 @@ export function ChatView(props: {
             {retryError && (
               <Alert variant="destructive">
                 <AlertDescription>{retryError}</AlertDescription>
+              </Alert>
+            )}
+            {(branchError ?? branches.error) && (
+              <Alert variant="destructive">
+                <AlertDescription>{branchError ?? branches.error}</AlertDescription>
               </Alert>
             )}
             {task && digSuggestions.length > 0 && (
@@ -836,12 +952,17 @@ export function ChatView(props: {
                   onEdit={() => {
                     if (stage?.template.kind === 'prompt') closeStage()
                   }}
-                  replies={replies && { items: replies, onDismiss: () => setHiddenTurn(turnId) }}
+                  replies={replies && { items: replies, onDismiss: () => setHiddenTurn(suggestTurn) }}
                   onSent={(text, picked) => {
-                    if (replies && turnId)
-                      window.desktop.replies.outcome(chatId, turnId, text, picked).catch(() => undefined)
+                    if (replies && suggestTurn)
+                      window.desktop.replies.outcome(chatId, suggestTurn, text, picked).catch(() => undefined)
+                    const after = afterSend.current
+                    afterSend.current = undefined
+                    if (after && text.includes(after.match)) after.run()
                   }}
                   tools={counter}
+                  usage={usage}
+                  newSession={newSession}
                 />
               </>
             )}
@@ -921,6 +1042,7 @@ export function ChatView(props: {
         <TaskLaunchDialog
           parentRunId={chatId}
           run={props.run}
+          bound={claudeCode?.branches}
           tasks={props.tasks ?? []}
           onDig={actionId => startDig(launchArtifact.id, actionId)}
           artifact={launchArtifact}
@@ -930,6 +1052,20 @@ export function ChatView(props: {
             if (launched)
               setSelected(current => new Map(current).set(launchArtifact.id, new Set()))
             setRefocus(actionKey(launchArtifact.id, launched ?? launching.actionIds[0]))
+          }}
+        />
+      )}
+      {spinningOff !== undefined && (
+        <SpinoffDialog
+          parentRunId={chatId}
+          parentTitle={props.run?.title ?? chatTitle(messages)}
+          cwd={claudeCode?.cwd}
+          prompt={spinningOff}
+          onClose={runId => {
+            setSpinningOff(undefined)
+            if (!runId) return
+            setDraft({ text: '' })
+            props.onOpenRun?.(runId)
           }}
         />
       )}

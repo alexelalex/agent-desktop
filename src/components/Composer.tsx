@@ -1,5 +1,6 @@
 import type { ChatStatus } from 'ai'
-import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
+import { SplitIcon } from 'lucide-react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
 import {
   PromptInput,
   PromptInputBody,
@@ -15,8 +16,12 @@ import {
 } from '@/components/ai-elements/prompt-input'
 import { ReplyRail } from '@/components/ReplyRail'
 import { Alert, AlertDescription } from '@/components/ui/alert'
+import { Button } from '@/components/ui/button'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import type { TokenUsage } from '@/lib/claude-code'
 import { parseCommand, type SlashCommand } from '@/lib/commands'
 import type { SuggestedReply } from '@/lib/desktop'
+import { formatCount, formatTokens } from '@/lib/format'
 import type { Mentionable } from '@/lib/mentions'
 
 interface ComposerProps {
@@ -31,8 +36,8 @@ interface ComposerProps {
   placeholder: string
   status: ChatStatus
   onStop: () => void
-  /** Replaces the input's text each time a new object is passed. */
-  draft?: { text: string }
+  /** Replaces the input's text each time a new object is passed; `ask` first asks before replacing typed text. */
+  draft?: { text: string; ask?: string }
   /** The user typed in the input. */
   onEdit?: () => void
   /** Shown left of the submit button. */
@@ -43,6 +48,10 @@ interface ComposerProps {
   replies?: { items: SuggestedReply[]; onDismiss: () => void }
   /** The text went out; `picked` is the suggestion it started from. */
   onSent?: (text: string, picked?: number) => void
+  /** The session's tokens, shown left of the submit button. */
+  usage?: TokenUsage
+  /** Sends the text to a new session instead, from a button or ⌘⇧↵; `blocked` says why it can't. */
+  newSession?: { blocked?: string; open: (text: string) => void }
 }
 
 /** The prompt input, with a slash command menu. */
@@ -77,12 +86,27 @@ function ComposerInput(props: ComposerProps) {
   const [selection, setSelection] = useState<{ text: string; start: number; end: number }>()
 
   const { setInput } = textInput
+  // A draft that would replace what the user typed waits for their answer.
+  const [held, setHeld] = useState<{ text: string; ask: string }>()
+  const typed = useRef(text)
+  typed.current = text
+  const place = useCallback(
+    (next: string, focus: boolean) => {
+      setInput(next)
+      setNotice(undefined)
+      setPicked(undefined)
+      setHeld(undefined)
+      if (focus) setSelection({ text: next, start: next.length, end: next.length })
+    },
+    [setInput],
+  )
   useEffect(() => {
     if (!draft) return
-    setInput(draft.text)
-    setNotice(undefined)
-    setPicked(undefined)
-  }, [draft, setInput])
+    const current = typed.current.trim()
+    if (draft.ask && current && current !== draft.text.trim())
+      return setHeld({ text: draft.text, ask: draft.ask })
+    place(draft.text, !!draft.ask)
+  }, [draft, place])
 
   useLayoutEffect(() => {
     const el = box.current
@@ -158,7 +182,14 @@ function ComposerInput(props: ComposerProps) {
     submit(`/${command.name}`)
   }
 
+  const spinoff = props.newSession
+  const canSpinOff = !!spinoff && !spinoff.blocked && !disabled && text.trim() !== ''
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (spinoff && e.key === 'Enter' && e.shiftKey && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault()
+      if (canSpinOff) spinoff.open(text.trim())
+      return
+    }
     // Tab takes the first suggestion, as in the Claude Code CLI; ⌥1–3 pick by position.
     if (railed && !e.nativeEvent.isComposing) {
       const plain = !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey
@@ -197,6 +228,21 @@ function ComposerInput(props: ComposerProps) {
       {notice && (
         <Alert>
           <AlertDescription>{notice}</AlertDescription>
+        </Alert>
+      )}
+      {held && (
+        <Alert>
+          <AlertDescription className="flex flex-wrap items-center justify-between gap-2">
+            <span>Replace what you typed with {held.ask}?</span>
+            <span className="flex gap-2">
+              <Button size="xs" onClick={() => place(held.text, true)}>
+                Replace
+              </Button>
+              <Button size="xs" variant="outline" onClick={() => setHeld(undefined)}>
+                Keep mine
+              </Button>
+            </span>
+          </AlertDescription>
         </Alert>
       )}
       {railed && <ReplyRail replies={replies} onPick={fill} onDismiss={props.replies!.onDismiss} />}
@@ -256,14 +302,56 @@ function ComposerInput(props: ComposerProps) {
           </PromptInputBody>
           <PromptInputFooter>
             <PromptInputTools>{props.tools}</PromptInputTools>
-            <PromptInputSubmit
-              status={status}
-              onStop={onStop}
-              disabled={!allowed}
-            />
+            <div className="flex shrink-0 items-center gap-2">
+              {props.usage && <UsageMeter usage={props.usage} />}
+              {spinoff && (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    {/* A disabled button gets no hover, so the tooltip hangs on its wrapper. */}
+                    <span tabIndex={canSpinOff ? -1 : 0}>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon-sm"
+                        aria-label="Send to a new session"
+                        disabled={!canSpinOff}
+                        onClick={() => spinoff.open(text.trim())}
+                      >
+                        <SplitIcon />
+                      </Button>
+                    </span>
+                  </TooltipTrigger>
+                  <TooltipContent side="top">
+                    {spinoff.blocked ?? 'Send to a new session (⌘⇧↵)'}
+                  </TooltipContent>
+                </Tooltip>
+              )}
+              <PromptInputSubmit
+                status={status}
+                onStop={onStop}
+                disabled={!allowed}
+              />
+            </div>
           </PromptInputFooter>
         </PromptInput>
       </div>
     </div>
+  )
+}
+
+function UsageMeter({ usage }: { usage: TokenUsage }) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span tabIndex={0} className="text-xs tabular-nums text-muted-foreground" aria-label="Token usage">
+          {formatTokens(usage.context)} context
+        </span>
+      </TooltipTrigger>
+      <TooltipContent side="top">
+        <div>{formatCount(usage.context)} tokens in context, as of the latest request</div>
+        <div>{formatCount(usage.output)} output tokens this session</div>
+        {usage.model && <div className="font-mono">{usage.model}</div>}
+      </TooltipContent>
+    </Tooltip>
   )
 }

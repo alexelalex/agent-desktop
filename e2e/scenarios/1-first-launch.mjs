@@ -31,7 +31,7 @@ await finish(async () => {
   await makeOrchestrator(page, 'alpha')
   await signOutPlugin(page, 'alpha')
   await closeOptions(page)
-  await page.getByRole('button', { name: 'New session' }).click()
+  await page.getByRole('button', { name: 'New session', exact: true }).click()
   check('signed out: composer disabled', await page.getByRole('textbox').isDisabled())
   check('signed out: reason shown', await visible(page.getByText('Connect the orchestrator in Options to chat.')))
   check('signed out: button to Options', await visible(page.getByRole('button', { name: 'Open Options' })))

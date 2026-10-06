@@ -6,6 +6,8 @@ export const taskOf = (run: RunSummary): TaskLink | undefined => run.claudeCode?
 
 export const isDig = (run: RunSummary) => taskOf(run)?.kind === 'dig'
 
+export const isSpinoff = (run: RunSummary) => taskOf(run)?.kind === 'spinoff'
+
 /** Shown at most, per row, before the rest fold under "N more tasks". */
 export const SHOWN_TASKS = 5
 
@@ -111,6 +113,7 @@ export function actionStatus(
 // A failed task stops counting once a newer task of its action exists.
 function superseded(task: RunSummary, siblings: RunSummary[]) {
   const link = taskOf(task)!
+  if (!link.actionId) return false
   return siblings.some(
     s =>
       s !== task &&
@@ -155,8 +158,9 @@ export function ancestors(run: RunSummary | undefined, byId: Map<string, RunSumm
   return chain
 }
 
-/** Whether the parent's current artifacts still offer the task's action. */
+/** Whether the parent's current artifacts still offer the task's action; a spin-off has none. */
 export function actionGone(task: TaskLink, parent: RunSummary | undefined) {
+  if (!task.actionId) return false
   const artifact = parent?.artifacts?.find(a => a.id === task.artifactId)
   return !artifact?.actions?.includes(task.actionId)
 }

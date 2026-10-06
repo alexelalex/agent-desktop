@@ -15,7 +15,7 @@ const firstText = (profile, runId) => {
 }
 
 async function makeAgent(page, prompt, name) {
-  await page.getByRole('button', { name: 'New session' }).click()
+  await page.getByRole('button', { name: 'New session', exact: true }).click()
   await page.getByRole('textbox').fill(prompt)
   await page.getByRole('textbox').press('Enter')
   await page.getByRole('button', { name: 'Stop', exact: true }).waitFor({ timeout: 20_000 }).catch(() => { })
@@ -91,7 +91,7 @@ await app.evaluate(({ Notification }) => {
   globalThis.shown = []
   Notification.prototype.show = function () { globalThis.shown.push(this.title); setTimeout(() => this.emit('click'), 100) }
 })
-await page.getByRole('button', { name: 'New session' }).click()
+await page.getByRole('button', { name: 'New session', exact: true }).click()
 await addTrigger(page, 'Closer C', 'On a schedule', async () => {
   await page.getByLabel('Schedule (cron, local time)').fill('*/20 * * * * *')
 })

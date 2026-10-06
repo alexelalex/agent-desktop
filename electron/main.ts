@@ -1,6 +1,7 @@
 import type { Tokens } from "@/lib/auth";
 import type { ChannelInput } from "@/lib/channels";
 import type {
+  BranchAction,
   ClaudeCodeSetup,
   Group,
   InstanceRequest,
@@ -9,6 +10,7 @@ import type {
   OpenRun,
   OutgoingMessage,
   RunContext,
+  SpinoffRequest,
   SuggesterSetup,
 } from "@/lib/desktop";
 import type { Template } from "@/lib/templates";
@@ -314,6 +316,17 @@ function registerIpc(
     (_, parentRunId: string, requests: LaunchRequest[]) =>
       runs.claudeCode.launch(parentRunId, requests),
   );
+  ipcMain.handle("claudeCode:writeContext", (_, parentRunId: string, prompt: string) =>
+    runs.claudeCode.writeContext(parentRunId, prompt),
+  );
+  ipcMain.handle("claudeCode:cancelContext", (_, parentRunId: string) =>
+    runs.claudeCode.cancelContext(parentRunId),
+  );
+  ipcMain.handle(
+    "claudeCode:spinoff",
+    (_, parentRunId: string, request: SpinoffRequest) =>
+      runs.claudeCode.spinoff(parentRunId, request),
+  );
   ipcMain.handle(
     "claudeCode:dig",
     (_, parentRunId: string, artifactId: string, actionId: string) =>
@@ -343,6 +356,23 @@ function registerIpc(
   );
   ipcMain.handle("claudeCode:reveal", (_, file: string) =>
     shell.showItemInFolder(file),
+  );
+  ipcMain.handle("claudeCode:branchView", (_, runId: string) =>
+    runs.claudeCode.branchView(runId),
+  );
+  ipcMain.handle("claudeCode:localBranches", (_, common: string) =>
+    runs.claudeCode.localBranches(common),
+  );
+  ipcMain.handle(
+    "claudeCode:bindBranch",
+    (_, runId: string, binding: Parameters<typeof runs.claudeCode.bindBranch>[1]) =>
+      runs.claudeCode.bindBranch(runId, binding),
+  );
+  ipcMain.handle("claudeCode:unbindBranch", (_, runId: string, common: string) =>
+    runs.claudeCode.unbindBranch(runId, common),
+  );
+  ipcMain.handle("claudeCode:branchPrompt", (_, runId: string, action: BranchAction) =>
+    runs.claudeCode.branchPrompt(runId, action),
   );
   ipcMain.handle(
     "mcp:respondApproval",
@@ -389,6 +419,7 @@ void app.whenReady().then(async () => {
     parentOf: (caller, conversation) => runs.claudeCode.parentOf(caller, conversation),
     tasksOf: (caller, id) => runs.claudeCode.tasksOf(caller, id),
     suggest: (caller, changes) => runs.claudeCode.suggest(caller, changes),
+    reportBranch: (caller, args) => runs.claudeCode.reportBranch(caller, args),
   });
   const alerts = new TaskAlerts({
     title: (runId) => runs.list().find((r) => r.id === runId)?.title,
