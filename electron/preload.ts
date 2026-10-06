@@ -99,6 +99,17 @@ const desktop: DesktopApi = {
       ipcRenderer.invoke("deliveries:send", runId, artifactId, channelIds),
     onChange: (listener) => on("deliveries:changed", listener),
   },
+  replies: {
+    request: (runId, turnId) => ipcRenderer.invoke("replies:request", runId, turnId),
+    outcome: (runId, turnId, text, picked) =>
+      ipcRenderer.invoke("replies:outcome", runId, turnId, text, picked),
+    onChange: (listener) => on("replies:changed", listener),
+  },
+  suggester: {
+    get: () => ipcRenderer.invoke("suggester:get"),
+    save: (setup) => ipcRenderer.invoke("suggester:save", setup),
+    onChange: (listener) => on("suggester:changed", listener),
+  },
   onOpenRun: (listener) => on("app:open-run", listener),
   runs: {
     list: () => ipcRenderer.invoke("runs:list"),

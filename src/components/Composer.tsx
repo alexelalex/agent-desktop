@@ -1,5 +1,5 @@
 import type { ChatStatus } from 'ai'
-import { useEffect, useState, type KeyboardEvent, type ReactNode } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
 import {
   PromptInput,
   PromptInputBody,
@@ -13,8 +13,10 @@ import {
   PromptInputTools,
   usePromptInputController,
 } from '@/components/ai-elements/prompt-input'
+import { ReplyRail } from '@/components/ReplyRail'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { parseCommand, type SlashCommand } from '@/lib/commands'
+import type { SuggestedReply } from '@/lib/desktop'
 import type { Mentionable } from '@/lib/mentions'
 
 interface ComposerProps {
@@ -37,6 +39,10 @@ interface ComposerProps {
   tools?: ReactNode
   /** What `@` offers: plugins and groups. */
   mentionables?: Mentionable[]
+  /** Suggested replies, shown above an empty input. */
+  replies?: { items: SuggestedReply[]; onDismiss: () => void }
+  /** The text went out; `picked` is the suggestion it started from. */
+  onSent?: (text: string, picked?: number) => void
 }
 
 /** The prompt input, with a slash command menu. */
@@ -65,13 +71,42 @@ function ComposerInput(props: ComposerProps) {
   const [notice, setNotice] = useState<string>()
   const [selected, setSelected] = useState('')
   const [dismissedAt, setDismissedAt] = useState<string>()
+  const box = useRef<HTMLTextAreaElement>(null)
+  const [picked, setPicked] = useState<number>()
+  // Applied once the input holds the filled text.
+  const [selection, setSelection] = useState<{ text: string; start: number; end: number }>()
 
   const { setInput } = textInput
   useEffect(() => {
     if (!draft) return
     setInput(draft.text)
     setNotice(undefined)
+    setPicked(undefined)
   }, [draft, setInput])
+
+  useLayoutEffect(() => {
+    const el = box.current
+    if (!selection || !el || el.value !== selection.text) return
+    el.focus()
+    el.setSelectionRange(selection.start, selection.end)
+    setSelection(undefined)
+  }, [selection, text])
+
+  const replies = props.replies?.items ?? []
+  const railed = replies.length > 0 && text === '' && !disabled
+  const fill = (index: number) => {
+    const reply = replies[index]
+    if (!reply) return
+    const at = reply.blank ? reply.text.indexOf(reply.blank) : -1
+    textInput.setInput(reply.text)
+    setNotice(undefined)
+    setPicked(index)
+    setSelection(
+      at >= 0
+        ? { text: reply.text, start: at, end: at + reply.blank!.length }
+        : { text: reply.text, start: reply.text.length, end: reply.text.length },
+    )
+  }
 
   // The menu is open while the text is a bare `/name` that matches a command,
   // or ends in an `@name` that matches a plugin or group.
@@ -107,6 +142,10 @@ function ComposerInput(props: ComposerProps) {
   const submit = (line: string) => {
     const problem = onSubmit(line)
     setNotice(problem)
+    if (!problem) {
+      props.onSent?.(line, picked)
+      setPicked(undefined)
+    }
     return problem
   }
 
@@ -120,6 +159,16 @@ function ComposerInput(props: ComposerProps) {
   }
 
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+    // Tab takes the first suggestion, as in the Claude Code CLI; ⌥1–3 pick by position.
+    if (railed && !e.nativeEvent.isComposing) {
+      const plain = !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey
+      const index =
+        e.key === 'Tab' && plain ? 0 : e.altKey && /^Digit[1-9]$/.test(e.code) ? Number(e.code.slice(5)) - 1 : -1
+      if (index >= 0 && index < replies.length) {
+        e.preventDefault()
+        return fill(index)
+      }
+    }
     if (!open || e.nativeEvent.isComposing) return
     const index = matches.indexOf(active)
     switch (e.key) {
@@ -150,6 +199,7 @@ function ComposerInput(props: ComposerProps) {
           <AlertDescription>{notice}</AlertDescription>
         </Alert>
       )}
+      {railed && <ReplyRail replies={replies} onPick={fill} onDismiss={props.replies!.onDismiss} />}
       <div className="relative">
         {open && (
           <div className="absolute inset-x-0 bottom-full z-10 mb-2">
@@ -195,8 +245,10 @@ function ComposerInput(props: ComposerProps) {
             <PromptInputTextarea
               placeholder={placeholder}
               disabled={disabled}
-              onChange={() => {
+              ref={box}
+              onChange={e => {
                 setNotice(undefined)
+                if (e.currentTarget.value === '') setPicked(undefined)
                 onEdit?.()
               }}
               onKeyDown={onKeyDown}

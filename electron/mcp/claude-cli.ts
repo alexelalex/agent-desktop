@@ -135,12 +135,18 @@ export function sessionCwd(): string {
   return cwd;
 }
 
+/** The app's environment without what would make a child take itself for another session. */
+export function cleanEnv(): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  for (const name of INHERITED) delete env[name];
+  return env;
+}
+
 export function turnEnv(
   port: number,
   options: { runId?: string; task?: boolean } = {},
 ): NodeJS.ProcessEnv {
-  const env = { ...process.env };
-  for (const name of INHERITED) delete env[name];
+  const env = cleanEnv();
   // The plugin's hooks read these: the driver header, and where the app listens.
   env.AGENT_DESKTOP_DRIVER = "app";
   env.AGENT_DESKTOP_MCP_PORT = String(port);

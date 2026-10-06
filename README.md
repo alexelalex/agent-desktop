@@ -169,6 +169,21 @@ all settled folds away.
 `node scripts/task-metrics.mjs` prints how actions are used: how many get launched, how
 often prompts are edited, and how long dispatching takes.
 
+### Reply suggestions
+
+When an agent ends its turn in the session you're viewing, up to three replies you're likely to
+send show above the composer. A click puts one in the composer, with any part you'll likely
+change selected; nothing is sent until you press Enter. In an empty composer, Tab takes the
+first and ⌥1–3 pick by position; × hides them for the turn. They don't show while an approval
+or question waits, in a dig, or where you can't reply.
+
+One Claude Code process the app runs writes them, on Sonnet 5.5 with thinking off. It has no
+built-in tools, none of your settings or plugins, and only its own three MCP tools:
+`ui_suggest_replies`, `ui_read_conversation` and `ui_set_reply_notes`. Each finished turn
+goes to it as a request on stdin, after a `/clear`, so sessions never leak into each other.
+What it learns about how you reply is kept as notes, which **Options → Replies** shows and
+edits, along with the model and an off switch. It exits after 10 idle minutes.
+
 ### Notifications
 
 Artifacts are how an agent reaches people. Open an artifact and choose **Notify** to pick
@@ -343,6 +358,7 @@ electron/
   channels.ts             notification channels and their encrypted settings
   delivery.ts             sends artifacts to channels; render-artifact.ts formats them
   tray.ts                 the menu-bar icon
+  mcp/suggester.ts        reply suggestions: the suggester process and its tools
 src/
   App.tsx                 shell: header with the Options cog, sidebar, main view
   components/
@@ -355,6 +371,7 @@ src/
     NotifyDialog.tsx      an artifact's channels, Send now, and the channel form
     ChatView.tsx          useRun, slash commands, /approve per tenant
     Composer.tsx          prompt input with the slash command and @ mention menus
+    ReplyRail.tsx         suggested replies above the composer
     OperationSearch.tsx   `/ops` results
     MessageParts.tsx      text, reasoning and tool parts; nests for subagent runs
     ToolCallCard.tsx      tool call + approval card, with the tenant it ran on

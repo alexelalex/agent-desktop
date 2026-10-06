@@ -679,6 +679,19 @@ export class RunManager {
     };
   }
 
+  /** A run's summary, whichever engine runs it. */
+  find(runId: string): RunSummary | undefined {
+    return this.index.get(runId) ?? this.claudeCode.list().find((r) => r.id === runId);
+  }
+
+  /** A run's messages, for readers that aren't its window. */
+  messagesOf(runId: string): UIMessage[] | undefined {
+    if (this.claudeCode.has(runId)) return this.claudeCode.messagesOf({ runId });
+    const driver = this.drivers.get(runId);
+    if (driver) return driver.chat.messages;
+    return this.index.has(runId) ? readJson<UIMessage[]>(messagesFile(runId), []) : undefined;
+  }
+
   open(viewer: WebContents, runId: string): RunSnapshot {
     if (!this.known.has(viewer)) {
       this.known.add(viewer);

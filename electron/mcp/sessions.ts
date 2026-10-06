@@ -31,6 +31,7 @@ import type {
   TaskPreview,
   WorktreeState,
 } from "@/lib/desktop";
+import { conversationText } from "@/lib/replies";
 import { chatTitle, countToolCalls } from "@/lib/runs";
 import type { DynamicToolUIPart, UIMessage } from "ai";
 import {
@@ -349,19 +350,6 @@ const listed = (run: RunSummary) =>
     run.artifacts?.map((a) => [a.id, a.title, a.bookmarks]),
     run.claudeCode,
   ]);
-
-// Its conversation as text for another session: what was said, and which tools ran.
-function conversationText(messages: UIMessage[], max: number): string {
-  const text = messages
-    .map((m) => {
-      const said = m.parts.flatMap((p) =>
-        p.type === "text" ? [p.text] : p.type === "dynamic-tool" ? [`[tool: ${p.toolName}]`] : [],
-      );
-      return `${m.role === "user" ? "User" : "Assistant"}: ${said.join("\n")}`;
-    })
-    .join("\n\n");
-  return text.length > max ? `…${text.slice(-max)}` : text;
-}
 
 const lastAnswer = (messages: UIMessage[]) => {
   const at = messages.findLastIndex((m) => m.role === "assistant");

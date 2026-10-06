@@ -9,6 +9,7 @@ import type {
   OpenRun,
   OutgoingMessage,
   RunContext,
+  SuggesterSetup,
 } from "@/lib/desktop";
 import type { Template } from "@/lib/templates";
 import { app, BrowserWindow, ipcMain, shell, type Tray } from "electron";
@@ -49,6 +50,7 @@ import { TriggerManager } from "./triggers";
 import { approvalHub, AUTO_APPROVED } from "./mcp/approval-hub";
 import { claudeCodeInfo, saveSetup } from "./mcp/claude-cli";
 import { mcpServer } from "./mcp/server";
+import { ReplySuggester } from "./mcp/suggester";
 
 // Set by scripts/electron.mjs in development; the built app loads dist/.
 const devServerUrl = process.env.VITE_DEV_SERVER_URL;
@@ -133,6 +135,7 @@ function registerIpc(
   runs: RunManager,
   triggers: TriggerManager,
   deliveries: DeliveryManager,
+  suggester: ReplySuggester,
 ) {
   ipcMain.handle("app:isFullScreen", (event) => {
     const win = BrowserWindow.fromWebContents(event.sender);
@@ -238,10 +241,25 @@ function registerIpc(
     "claudeCode:save",
     async (_, setup: Partial<ClaudeCodeSetup>) => {
       saveSetup(setup);
+      // The next suggestions start from the binary set now.
+      suggester.stop();
       const info = await claudeCodeInfo();
       broadcast("claudeCode:changed", info);
       return info;
     },
+  );
+
+  ipcMain.handle("replies:request", (_, runId: string, turnId: string) =>
+    suggester.request(runId, turnId),
+  );
+  ipcMain.handle(
+    "replies:outcome",
+    (_, runId: string, turnId: string, text: string, picked?: number) =>
+      suggester.outcome(runId, turnId, text, picked),
+  );
+  ipcMain.handle("suggester:get", () => suggester.info());
+  ipcMain.handle("suggester:save", (_, setup: Partial<SuggesterSetup>) =>
+    suggester.save(setup),
   );
 
   // MCP integration handlers
@@ -349,7 +367,9 @@ void app.whenReady().then(async () => {
   const runs = new RunManager(broadcast);
   const triggers = new TriggerManager(runs, (run) => openRun({ run }));
   const deliveries = new DeliveryManager(runs, openRun, broadcast);
-  registerIpc(runs, triggers, deliveries);
+  const suggester = new ReplySuggester(runs, () => mcpServer.getPort(), broadcast);
+  registerIpc(runs, triggers, deliveries, suggester);
+  mcpServer.onSuggester(suggester);
 
   // Claude Code sessions attach through the plugin's hooks and show as runs.
   mcpServer.onHook((input, fromApp, pid) =>
@@ -436,6 +456,7 @@ void app.whenReady().then(async () => {
     triggers.stop();
     runs.stopAll();
     runs.claudeCode.stopAll();
+    suggester.stop();
     mcpServer.stop();
     tray?.destroy();
   });

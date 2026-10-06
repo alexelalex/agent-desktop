@@ -365,6 +365,41 @@ export interface ClaudeCodeInfo extends ClaudeCodeSetup {
   defaultCwd: string;
 }
 
+export type ReplyKind = "answer" | "next" | "redirect";
+
+/** A reply the suggester expects the user to send next. */
+export interface SuggestedReply {
+  label: string;
+  text: string;
+  kind: ReplyKind;
+  /** A part of `text` the user will likely change; selected when the composer fills. */
+  blank?: string;
+}
+
+/** The suggestions for a run's latest turn, by the key of its last message. */
+export interface ReplyState {
+  runId: string;
+  turnId: string;
+  status: "pending" | "ready" | "none" | "failed" | "off";
+  replies: SuggestedReply[];
+}
+
+/** Reply suggestions as kept in Options. */
+export interface SuggesterSetup {
+  enabled: boolean;
+  model: string;
+  /** What the suggester learned about how the user replies. */
+  notes: string[];
+}
+
+export interface SuggesterInfo extends SuggesterSetup {
+  state: "off" | "idle" | "ready" | "working" | "failed";
+  error?: string;
+  /** How long the last suggestions took to arrive. */
+  lastMs?: number;
+  transcriptPath?: string;
+}
+
 export interface McpState {
   /** Auto mode for approvals no session claims. */
   autoApprove: boolean;
@@ -498,6 +533,18 @@ export interface DesktopApi {
       channelIds: string[],
     ): Promise<Delivery[]>;
     onChange(listener: (runId: string) => void): Unsubscribe;
+  };
+  replies: {
+    /** The suggestions for the run's turn `turnId`, asking for them when there are none yet. */
+    request(runId: string, turnId: string): Promise<ReplyState | undefined>;
+    /** What the user sent after suggestions were shown, and which one they picked. */
+    outcome(runId: string, turnId: string, text: string, picked?: number): Promise<void>;
+    onChange(listener: (state: ReplyState) => void): Unsubscribe;
+  };
+  suggester: {
+    get(): Promise<SuggesterInfo>;
+    save(setup: Partial<SuggesterSetup>): Promise<SuggesterInfo>;
+    onChange(listener: (info: SuggesterInfo) => void): Unsubscribe;
   };
   /** The main process asks the window to show a run, e.g. from a notification. */
   onOpenRun(listener: (target: OpenRun) => void): Unsubscribe;

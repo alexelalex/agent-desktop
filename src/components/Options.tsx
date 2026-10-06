@@ -1,4 +1,4 @@
-import { PlusIcon, RefreshCwIcon } from 'lucide-react'
+import { PlusIcon, RefreshCwIcon, XIcon } from 'lucide-react'
 import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
@@ -19,9 +19,18 @@ import {
 } from '@/components/ui/select'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { completeTwoFactor, login, type Tokens, type TwoFactorChallenge } from '@/lib/auth'
-import type { ClaudeCodeInfo, Group, PluginInfo, ScopeInfo } from '@/lib/desktop'
+import type {
+  ClaudeCodeInfo,
+  Group,
+  PluginInfo,
+  ScopeInfo,
+  SuggesterInfo,
+  SuggesterSetup,
+} from '@/lib/desktop'
 import { CHANNELS_COMMAND } from '@/lib/claude-code'
 import { claudeCodeOrchestrates, orchestratorOf, STATUS_LABELS, useShell } from '@/lib/plugins'
+import { MAX_NOTE, MAX_NOTES, SUGGESTER_MODELS } from '@/lib/replies'
+import { cn } from '@/lib/utils'
 
 function Field(props: { label: string; children: ReactNode }) {
   return (
@@ -52,6 +61,7 @@ export function Options(props: {
             <TabsTrigger value="plugins">Plugins</TabsTrigger>
             <TabsTrigger value="groups">Groups</TabsTrigger>
             <TabsTrigger value="claude-code">Claude Code</TabsTrigger>
+            <TabsTrigger value="replies">Replies</TabsTrigger>
           </TabsList>
           <TabsContent value="plugins">
             <PluginsTab
@@ -65,6 +75,9 @@ export function Options(props: {
           </TabsContent>
           <TabsContent value="claude-code">
             <ClaudeCodeTab />
+          </TabsContent>
+          <TabsContent value="replies">
+            <RepliesTab />
           </TabsContent>
         </Tabs>
       </DialogContent>
@@ -315,6 +328,140 @@ function ClaudeCodeSetupForm({ info, orchestrates, switchable }: {
           )}
         </div>
       </form>
+    </div>
+  )
+}
+
+const SUGGESTER_STATES: Record<SuggesterInfo['state'], string> = {
+  off: 'Off',
+  idle: 'Not running; it starts with the next turn',
+  ready: 'Ready',
+  working: 'Suggesting…',
+  failed: 'The last request failed',
+}
+
+function RepliesTab() {
+  const [info, setInfo] = useState<SuggesterInfo>()
+  const [note, setNote] = useState('')
+  const [error, setError] = useState<string>()
+  useEffect(() => {
+    void window.desktop.suggester.get().then(setInfo)
+    return window.desktop.suggester.onChange(setInfo)
+  }, [])
+  if (!info) return null
+  const save = (change: Partial<SuggesterSetup>) => {
+    setError(undefined)
+    // Shown at once, so a control doesn't snap back while the save is on its way.
+    setInfo(current => current && { ...current, ...change })
+    window.desktop.suggester.save(change).then(setInfo, e => setError(String(e?.message ?? e)))
+  }
+  const add = (e: FormEvent) => {
+    e.preventDefault()
+    if (!note.trim()) return
+    save({ notes: [...info.notes, note] })
+    setNote('')
+  }
+  const full = info.notes.length >= MAX_NOTES
+  return (
+    <div className="flex flex-col gap-4 text-sm">
+      <p className="text-muted-foreground">
+        When an agent ends its turn in the session you're viewing, a Claude Code session the app
+        runs suggests up to three replies above the message box. A click puts one in the box;
+        nothing is sent until you press Enter.
+      </p>
+      <label className="flex items-center gap-2 font-medium">
+        <input
+          type="checkbox"
+          className="size-4 accent-primary"
+          checked={info.enabled}
+          onChange={e => save({ enabled: e.target.checked })}
+        />
+        Suggest replies
+      </label>
+      <Field label="Model">
+        <Select value={info.model} onValueChange={model => save({ model })}>
+          <SelectTrigger className="w-56" aria-label="Model">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {SUGGESTER_MODELS.map(m => (
+              <SelectItem key={m.id} value={m.id}>
+                {m.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </Field>
+      <section aria-label="What it learned" className="flex flex-col gap-2">
+        <span className="font-medium">What it learned about how you reply</span>
+        {info.notes.length === 0 ? (
+          <p className="text-muted-foreground">
+            Nothing yet. It updates these from what you pick, edit, or type instead.
+          </p>
+        ) : (
+          <ul className="flex flex-col gap-1">
+            {info.notes.map((n, i) => (
+              <li key={`${i}:${n}`} className="flex items-center justify-between gap-2 rounded-md bg-muted px-2.5 py-1.5">
+                <span className="min-w-0 break-words">{n}</span>
+                <Button
+                  variant="ghost"
+                  size="icon-xs"
+                  aria-label={`Forget: ${n}`}
+                  onClick={() => save({ notes: info.notes.filter((_, j) => j !== i) })}
+                >
+                  <XIcon />
+                </Button>
+              </li>
+            ))}
+          </ul>
+        )}
+        <form className="flex gap-2" onSubmit={add}>
+          <Input
+            aria-label="New note"
+            value={note}
+            maxLength={MAX_NOTE}
+            disabled={full}
+            placeholder={full ? `At most ${MAX_NOTES} notes` : 'e.g. Short lowercase replies'}
+            onChange={e => setNote(e.target.value)}
+          />
+          <Button size="sm" variant="outline" type="submit" disabled={full || !note.trim()}>
+            Add
+          </Button>
+        </form>
+        {info.notes.length > 0 && (
+          <Button variant="link" size="xs" className="self-start p-0" onClick={() => save({ notes: [] })}>
+            Forget all
+          </Button>
+        )}
+      </section>
+      <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+        <span
+          aria-hidden
+          className={cn(
+            'size-1.5 rounded-full bg-muted-foreground',
+            info.state === 'ready' && 'bg-emerald-500',
+            info.state === 'working' && 'bg-amber-500',
+            info.state === 'failed' && 'bg-destructive',
+          )}
+        />
+        <span>{SUGGESTER_STATES[info.state]}</span>
+        {info.lastMs !== undefined && <span>· last suggestions in {(info.lastMs / 1000).toFixed(1)} s</span>}
+        {info.transcriptPath && (
+          <Button
+            variant="link"
+            size="xs"
+            className="h-auto p-0"
+            onClick={() => void window.desktop.claudeCode.reveal(info.transcriptPath!)}
+          >
+            Show transcript file
+          </Button>
+        )}
+      </p>
+      {(error ?? (info.state === 'failed' && info.error)) && (
+        <Alert variant="destructive">
+          <AlertDescription>{error ?? info.error}</AlertDescription>
+        </Alert>
+      )}
     </div>
   )
 }

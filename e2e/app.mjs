@@ -1,5 +1,5 @@
 // Launches the built app under Playwright with a throwaway profile.
-import { mkdirSync, mkdtempSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import path from 'node:path'
 import { _electron } from 'playwright'
@@ -12,6 +12,8 @@ mkdirSync(OUT, { recursive: true })
 const electron = createRequire(import.meta.url)('electron')
 
 export async function launch(profile = mkdtempSync(path.join(OUT, 'profile-')), env = {}) {
+  // Reply suggestions spawn `claude`, the real one when no fake is set: a suite turns them on.
+  if (!existsSync(`${profile}/suggester.json`)) writeFileSync(`${profile}/suggester.json`, JSON.stringify({ enabled: false }))
   const app = await _electron.launch({
     executablePath: electron,
     args: [ROOT, `--user-data-dir=${profile}`],

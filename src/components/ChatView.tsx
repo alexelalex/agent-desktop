@@ -20,6 +20,7 @@ import { Message, MessageContent } from '@/components/ai-elements/message'
 import { ArtifactsPanel } from '@/components/ArtifactsPanel'
 import { ClaudeCodeAgents, useClaudeCodeAgents } from '@/components/ClaudeCodeAgents'
 import { Composer } from '@/components/Composer'
+import { useReplies } from '@/components/ReplyRail'
 import { MessageParts } from '@/components/MessageParts'
 import { OperationSearch } from '@/components/OperationSearch'
 import { TemplateNote, TemplateStage } from '@/components/TemplateStage'
@@ -69,6 +70,7 @@ import {
   stampsOf,
   touchedPlugins,
 } from '@/lib/routing'
+import { turnKey } from '@/lib/replies'
 import { chatTitle } from '@/lib/runs'
 import type { SpecOperation } from '@/lib/spec'
 import {
@@ -375,6 +377,23 @@ export function ChatView(props: {
     !!task &&
     loaded &&
     !messages.some(m => m.role === 'user' && !(m.metadata as { pending?: boolean } | undefined)?.pending)
+  // Suggested replies, once a turn ended that the user can answer from here.
+  const lastMessage = messages.at(-1)
+  const turnId = lastMessage?.role === 'assistant' ? turnKey(lastMessage) : undefined
+  const suggestible =
+    loaded &&
+    !busy &&
+    !running &&
+    props.run?.status === 'completed' &&
+    !awaitingApproval &&
+    canReply &&
+    !readOnly &&
+    !notStarted &&
+    task?.kind !== 'dig'
+  const replyState = useReplies(chatId, suggestible ? turnId : undefined)
+  const [hiddenTurn, setHiddenTurn] = useState<string>()
+  const replies =
+    replyState?.status === 'ready' && hiddenTurn !== turnId ? replyState.replies : undefined
   const parentTitle = props.parent?.title
   const sourceArtifact = task && props.parent?.artifacts?.find(a => a.id === task.artifactId)
   const worktree = task?.worktree
@@ -816,6 +835,11 @@ export function ChatView(props: {
                   draft={draft}
                   onEdit={() => {
                     if (stage?.template.kind === 'prompt') closeStage()
+                  }}
+                  replies={replies && { items: replies, onDismiss: () => setHiddenTurn(turnId) }}
+                  onSent={(text, picked) => {
+                    if (replies && turnId)
+                      window.desktop.replies.outcome(chatId, turnId, text, picked).catch(() => undefined)
                   }}
                   tools={counter}
                 />

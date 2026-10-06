@@ -21,6 +21,7 @@ import {
   loadPluginOperations,
 } from "./tenant-bridge";
 import { DIG_READ_ONLY } from "./dig";
+import { SUGGESTER_RUN, type ReplySuggester } from "./suggester";
 import { UI_TOOL_DEFINITIONS, handleUiToolCall } from "./ui-tools";
 
 const INSTRUCTIONS = `Agent Desktop shows this session in its window. For multi-step work, set a plan with ui_set_plan and keep it current with ui_update_step; report progress with ui_post_activity and findings with ui_render_artifact. Call ui_request_approval before any tenant tool marked MUTATING. Offer work the user may want run on its own as \`actions\` on an artifact; the user launches each as a task, and ui_list_tasks reports on them. Never call ui_permission: Claude Code calls it. A <channel> message from this server is the user writing from Agent Desktop: answer it as you would a prompt typed here, since the app shows this transcript.`;
@@ -47,6 +48,7 @@ const runOf = (req: http.IncomingMessage) => {
   const runId = req.headers[RUN_HEADER];
   return typeof runId === "string" && runId ? runId : undefined;
 };
+const isSuggester = (caller: Caller) => !!caller.runId?.startsWith(SUGGESTER_RUN);
 
 /** Who a connection is: a terminal's Claude Code process, or a turn the app runs. */
 export interface Caller {
@@ -58,7 +60,7 @@ export class DesktopMcpServer {
   private httpServer?: http.Server;
   private connections = new Map<
     string,
-    { transport: SSEServerTransport; server: Server; pid?: number }
+    { transport: SSEServerTransport; server: Server; pid?: number; suggester: boolean }
   >();
   private activePort?: number;
   private hookListeners: ((
@@ -79,6 +81,7 @@ export class DesktopMcpServer {
     suggest: (caller: Caller, changes: unknown) => string;
   };
   private restorer?: (caller: Caller) => Promise<string>;
+  private suggester?: Pick<ReplySuggester, "owns" | "tools" | "call">;
   private diagrams?: (sources: string[]) => Promise<(string | null)[]>;
 
   /** Parses mermaid for ui_render_artifact; only a window can. */
@@ -105,6 +108,11 @@ export class DesktopMcpServer {
   /** The parent and tasks of the session behind a connection, for ui_read_parent and ui_list_tasks. */
   onTasks(reader: NonNullable<DesktopMcpServer["tasks"]>) {
     this.tasks = reader;
+  }
+
+  /** The reply suggester: its connection sees its own tools and nothing else. */
+  onSuggester(suggester: NonNullable<DesktopMcpServer["suggester"]>) {
+    this.suggester = suggester;
   }
 
   /** Rewinds files for the session behind a connection, after a retry. */
@@ -163,9 +171,11 @@ export class DesktopMcpServer {
             "claude/channel/permission": {},
           },
         },
-        instructions: this.info?.(caller)?.task
-          ? `${INSTRUCTIONS} ${TASK_INSTRUCTIONS}`
-          : INSTRUCTIONS,
+        instructions: isSuggester(caller)
+          ? undefined
+          : this.info?.(caller)?.task
+            ? `${INSTRUCTIONS} ${TASK_INSTRUCTIONS}`
+            : INSTRUCTIONS,
       },
     );
     this.registerHandlers(server, caller);
@@ -182,6 +192,12 @@ export class DesktopMcpServer {
     const { name, arguments: args, _meta } = params;
     const meta = _meta?.["claudecode/toolUseId"];
     const toolUseId = typeof meta === "string" ? meta : undefined;
+    if (isSuggester(caller)) {
+      const out = this.suggester?.owns(caller.runId)
+        ? this.suggester.call(name, args ?? {})
+        : { isError: true, text: "This suggester session has ended." };
+      return { isError: !!out.isError, content: [{ type: "text" as const, text: out.text }] };
+    }
     if (name.startsWith("ui_")) {
       const tasks = this.tasks;
       return await handleUiToolCall(name, args ?? {}, {
@@ -246,6 +262,8 @@ export class DesktopMcpServer {
   private registerHandlers(server: Server, caller: Caller) {
     // 1. Tools: UI tools + dynamic tenant tools derived from OpenAPI
     server.setRequestHandler(ListToolsRequestSchema, async () => {
+      if (isSuggester(caller))
+        return { tools: this.suggester?.owns(caller.runId) ? this.suggester.tools : [] };
       const tenantTools = await listTenantTools().catch((err) => {
         console.warn("[MCP Server] Error listing tenant tools:", err);
         return [];
@@ -280,13 +298,14 @@ export class DesktopMcpServer {
     // 2. Resources: ambient context (tenants, active plan, artifacts)
     server.setRequestHandler(ListResourcesRequestSchema, async () => {
       return {
-        resources: MCP_RESOURCES,
+        resources: isSuggester(caller) ? [] : MCP_RESOURCES,
       };
     });
 
     server.setRequestHandler(
       ReadResourceRequestSchema,
       async (request) => {
+        if (isSuggester(caller)) throw new Error("No resources here.");
         return readResource(request.params.uri, this.lookup?.(caller) ?? []);
       },
     );
@@ -352,12 +371,15 @@ export class DesktopMcpServer {
           const transport = new SSEServerTransport("/messages", res);
           const sessionId = transport.sessionId;
           const pid = pidOf(req);
-          const server = this.createServer({ pid, runId: runOf(req) });
-          this.connections.set(sessionId, { transport, server, pid });
+          const caller = { pid, runId: runOf(req) };
+          const suggester = isSuggester(caller);
+          const server = this.createServer(caller);
+          this.connections.set(sessionId, { transport, server, pid, suggester });
 
+          // The suggester's connection is the app's own, not a session attached.
           transport.onclose = () => {
             this.connections.delete(sessionId);
-            if (this.connections.size === 0)
+            if (!suggester && ![...this.connections.values()].some((c) => !c.suggester))
               for (const cb of this.detachListeners) cb();
           };
 

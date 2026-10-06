@@ -12,7 +12,7 @@ const SCRIPTS = {
 }
 
 // One JSON value from `start`: brackets and braces matched, strings skipped.
-function jsonAt(text, start) {
+export function jsonAt(text, start) {
   let depth = 0
   let string = false
   for (let i = start; i < text.length; i++) {

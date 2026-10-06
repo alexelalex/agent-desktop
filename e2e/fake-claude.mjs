@@ -10,7 +10,7 @@ import path from 'node:path'
 import { createInterface } from 'node:readline'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js'
-import { scriptOf } from './fake-scripts.mjs'
+import { jsonAt, scriptOf } from './fake-scripts.mjs'
 
 const ZERO = '00000000-0000-0000-0000-000000000000'
 const LOG = process.env.FAKE_CLAUDE_LOG ?? new URL('./.out/fake-claude.log', import.meta.url).pathname
@@ -268,9 +268,51 @@ const steps = {
 }
 
 
+// The app's reply suggester: the agent's last message may hold `[fake-suggest:<json>]`, a list of
+// [step, args] with steps suggest, read, notes and wait.
+const suggester = argv.includes('mcp__desktop__ui_suggest_replies')
+const SUGGESTER_TOOLS = { suggest: 'ui_suggest_replies', read: 'ui_read_conversation', notes: 'ui_set_reply_notes' }
+async function suggest(content) {
+  if (first) {
+    first = false
+    out({ type: 'system', subtype: 'init', session_id: sessionId, cwd, permissionMode: mode })
+    log({ event: 'suggester-tools', names: (await (await mcp).listTools()).tools.map(t => t.name) })
+  }
+  write({ type: 'user', message: { role: 'user', content } })
+  let error
+  if (content !== '/clear') {
+    try {
+      const request = JSON.parse(content)
+      log({ event: 'suggester-request', request })
+      const said = request.conversation.slice(request.conversation.lastIndexOf('\n\nAssistant: '))
+      const at = said.lastIndexOf('[fake-suggest:')
+      const plan = at < 0
+        ? [['suggest', { replies: [{ label: 'Go on', text: 'go on', kind: 'next' }] }]]
+        : jsonAt(said, at + '[fake-suggest:'.length).value
+      for (const [step, args] of plan) {
+        if (step === 'wait') {
+          await new Promise(resolve => setTimeout(resolve, args))
+          continue
+        }
+        const tool = SUGGESTER_TOOLS[step]
+        const input = step === 'suggest' ? { request_id: request.request_id, ...args } : step === 'read' ? { run_id: request.run_id, ...args } : { notes: args }
+        const result = await mcpCall(await mcp, tool, input, `toolu_suggest_${randomUUID().slice(0, 8)}`)
+        log({ event: 'suggester-call', tool, input, result })
+      }
+    } catch (e) {
+      error = e
+      log({ event: 'step-error', message: String(e?.stack ?? e) })
+    }
+  }
+  out(error
+    ? { type: 'result', subtype: 'error_during_execution', is_error: true, result: error.message, session_id: sessionId }
+    : { type: 'result', subtype: 'success', is_error: false, result: 'ok', session_id: sessionId })
+}
+
 let first = true
 async function turn(content) {
   log({ event: 'input', sessionId, content })
+  if (suggester) return suggest(content)
   // Lets a test see the window before the transcript has the prompt.
   if (first && process.env.FAKE_PROMPT_DELAY_MS) await new Promise(r => setTimeout(r, Number(process.env.FAKE_PROMPT_DELAY_MS)))
   const prompt = write({ type: 'user', message: { role: 'user', content } })
