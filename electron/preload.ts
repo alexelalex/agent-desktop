@@ -21,6 +21,7 @@ const desktop: DesktopApi = {
     onApprovalResolved: (listener) => on("mcp:approval-resolved", listener),
     onPortChanged: (listener) => on("mcp:port-updated", listener),
     setAutoApprove: (on) => ipcRenderer.invoke("mcp:setAutoApprove", on),
+    approveAll: (id, reason) => ipcRenderer.invoke("mcp:approveAll", id, reason),
     onAutoApproveChanged: (listener) => on("mcp:auto-approve", listener),
   },
   claudeCode: {

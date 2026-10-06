@@ -552,6 +552,10 @@ export class ClaudeCodeSessions {
     return !!(runId && this.sessions.get(runId)?.task);
   }
 
+  autoApproves(runId: string | undefined) {
+    return !!(runId && this.sessions.get(runId)?.summary.claudeCode?.autoApprove);
+  }
+
   /** A task moved into awaiting approval or failed. */
   onAttention(listener: (event: Attention) => void) {
     this.attentionListeners.push(listener);

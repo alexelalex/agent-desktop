@@ -274,7 +274,7 @@ function registerIpc(
     port:
       mcpServer.getPort() ?? Number(process.env.AGENT_DESKTOP_MCP_PORT) ?? 4040,
   }));
-  ipcMain.handle("mcp:setAutoApprove", (_, on: boolean) => {
+  const setAutoApprove = (on: boolean) => {
     autoApprove = on;
     if (on) {
       // A task's approvals are never given by the global auto mode.
@@ -287,6 +287,15 @@ function registerIpc(
           approvalHub.respond(req.id, true, AUTO_APPROVED);
     }
     broadcast("mcp:auto-approve", on);
+  };
+  ipcMain.handle("mcp:setAutoApprove", (_, on: boolean) => setAutoApprove(on));
+  // Approves one request and those after it: a task's turns on that task's own auto mode.
+  ipcMain.handle("mcp:approveAll", (_, id: string, reason?: string) => {
+    const req = approvalHub.listPending().find((r) => r.id === id);
+    if (req?.runId && runs.claudeCode.isTask(req.runId))
+      runs.claudeCode.setAutoApprove(req.runId, true);
+    else setAutoApprove(true);
+    return approvalHub.respond(id, true, reason);
   });
   ipcMain.handle(
     "claudeCode:setAutoApprove",
@@ -452,9 +461,12 @@ void app.whenReady().then(async () => {
   approvalHub.onRequested(
     (req) =>
       void runs.claudeCode.claim(req).then((runId) => {
-        // Auto mode gives approvals, never a sign-in, a question's answers or a task's.
-        if (!runId && autoApprove && !req.kind && !runs.claudeCode.isTask(req.runId))
-          approvalHub.respond(req.id, true, AUTO_APPROVED);
+        // Auto mode gives approvals, never a sign-in or a question's answers;
+        // a task's only by the task's own.
+        const auto =
+          runs.claudeCode.autoApproves(req.runId) ||
+          (autoApprove && !runs.claudeCode.isTask(req.runId));
+        if (!runId && auto && !req.kind) approvalHub.respond(req.id, true, AUTO_APPROVED);
         if (approvalHub.isPending(req.id))
           broadcast("mcp:approval-requested", { ...req, runId });
       }),

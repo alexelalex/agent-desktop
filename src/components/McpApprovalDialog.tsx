@@ -111,8 +111,8 @@ export function McpApprovalDialog({
   request?: McpApprovalRequest;
   onRespond: (id: string, approved: boolean, reason?: string) => void;
   onSignIn: (pluginId: string) => void;
-  /** Approves this and every later request without asking. */
-  onApproveAll: () => void;
+  /** Approves this and every later request without asking; for a task's, that task's. */
+  onApproveAll: (id: string, reason?: string) => void;
 }) {
   const [reason, setReason] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -128,10 +128,11 @@ export function McpApprovalDialog({
     );
   }
 
-  const handleAction = async (approved: boolean) => {
+  const handleAction = async (approved: boolean, all = false) => {
     setSubmitting(true);
     try {
-      await onRespond(request.id, approved, reason.trim() || undefined);
+      const why = reason.trim() || undefined;
+      await (all ? onApproveAll(request.id, why) : onRespond(request.id, approved, why));
     } finally {
       setSubmitting(false);
       setReason("");
@@ -226,7 +227,7 @@ export function McpApprovalDialog({
             variant="outline"
             size="sm"
             disabled={submitting}
-            onClick={onApproveAll}
+            onClick={() => handleAction(true, true)}
             title="Approve this and every later request without asking"
           >
             Approve all

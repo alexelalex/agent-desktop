@@ -554,6 +554,8 @@ export interface DesktopApi {
     ): Unsubscribe;
     onPortChanged(listener: (port: number) => void): Unsubscribe;
     setAutoApprove(on: boolean): Promise<void>;
+    /** Approves the request and turns on auto mode: a task's own, for a task's request. */
+    approveAll(id: string, reason?: string): Promise<boolean>;
     onAutoApproveChanged(listener: (on: boolean) => void): Unsubscribe;
   };
   claudeCode: {

@@ -61,8 +61,7 @@ function Home() {
   const [optionsOpen, setOptionsOpen] = useState(false);
   // The plugin a sign-in prompt opened Options to sign in.
   const [signIn, setSignIn] = useState<string>();
-  const { pendingApprovals, respondApproval, setAutoApprove } =
-    useMcp();
+  const { pendingApprovals, respondApproval, approveAll } = useMcp();
   const shell = useMemo(
     () => ({
       blocked,
@@ -287,7 +286,7 @@ function Home() {
           <McpApprovalDialog
             request={pendingApprovals[0]}
             onRespond={respondApproval}
-            onApproveAll={() => void setAutoApprove(true)}
+            onApproveAll={approveAll}
             onSignIn={(pluginId) => {
               setSignIn(pluginId);
               setOptionsOpen(true);

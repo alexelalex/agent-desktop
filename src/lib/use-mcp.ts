@@ -51,10 +51,18 @@ export function useMcp() {
     return ok;
   };
 
+  const approveAll = async (id: string, reason?: string) => {
+    if (!window.desktop?.mcp) return false;
+    const ok = await window.desktop.mcp.approveAll(id, reason);
+    setPendingApprovals((prev) => prev.filter((r) => r.id !== id));
+    return ok;
+  };
+
   return {
     pendingApprovals: pendingApprovals.filter((r) => !r.runId),
     mcpPort,
     respondApproval,
+    approveAll,
     autoApprove,
     setAutoApprove: (on: boolean) => window.desktop.mcp.setAutoApprove(on),
   };
