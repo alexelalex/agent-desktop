@@ -9,8 +9,11 @@ const NAMESPACES = new Set([
   'integrations',
 ])
 
-// Read-only StreamForce and rule ops; the rest of these namespaces stays hidden.
+// Read-only StreamForce, rule and CVE ops; the rest of these namespaces stays hidden.
 const OPERATIONS = new Set([
+  'cve__listCves',
+  'cve__listCveResources',
+  'cve__getCve',
   'streamforce__agents__list',
   'streamforce__agents__get',
   'streamforce__runs__list',
