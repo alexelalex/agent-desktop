@@ -1586,6 +1586,13 @@ export class ClaudeCodeSessions {
     }
     const task = session.task;
     const cwd = session.summary.claudeCode?.cwd || sessionCwd();
+    // Node reports a missing cwd as the binary missing.
+    if (!isDirectory(cwd)) {
+      session.failed = true;
+      session.starting = false;
+      session.notice = `This session's folder no longer exists: ${cwd}`;
+      return this.update(session, { changed: [] }, true);
+    }
     // A worktree task's mode comes from the session, so resumes and retries keep it.
     const root = task?.worktree?.path;
     const acceptEdits = !!root && !!found.acceptEdits;
